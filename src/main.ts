@@ -16,6 +16,7 @@ import { accountStatusLine, parseBinding, vaultLabel, type AccountBinding } from
 import { getExistingHostKey, replaceHostKey } from './pairing-key-store';
 import { hostPairingKeyId } from './pairing-key';
 import { HostPresenceClient } from './host-presence';
+import { setPluginVersion } from './client-version';
 import { HostSignalClient } from './host-signal-client';
 import { READER_WAIT_MESSAGE, READER_WAIT_STATUS, ReaderWaitMonitor } from './host-waiting';
 import type { AuthorizationLease } from './authenticated-read-session';
@@ -300,7 +301,7 @@ export default class NoteRelayPlugin extends Plugin {
   private pairingFlowInstance: PairingFlow | null = null;
   private presence: HostPresenceClient | null = null;
   private signal: HostSignalClient | null = null;
-  private remoteStatus: 'unpaired' | 'unavailable' | null = null;
+  private remoteStatus: 'unpaired' | 'refused' | 'blocked' | 'unavailable' | null = null;
   /** True only while the signal client can prove an authenticated reader is attached and stuck. */
   private readerWaiting = false;
   /** The account this vault is linked to, or null. Loaded once in onload and shown in the pane. */
@@ -310,6 +311,9 @@ export default class NoteRelayPlugin extends Plugin {
 
   async onload(): Promise<void> {
     this.adapter = new ObsidianAdapter(this.app);
+    // Every presence renewal names this build, so the relay's deny list can see it. Set before any
+    // network call: an unset version sends no header, which reads as "unknown build" to the gate.
+    setPluginVersion(this.manifest.version);
     // Obsidian ships Mermaid; use it rather than bundling ~5 MB into main.js.
     this.adapter.useMermaid(makeMermaidRenderer(this.app));
     this.statusEl = this.addStatusBarItem();
@@ -320,6 +324,14 @@ export default class NoteRelayPlugin extends Plugin {
     this.statusEl.onclick = () => this.toggleHost();
     this.setStatus();
     this.watchVaultNotes();
+    // A laptop that sleeps wakes with a lapsed presence lease and a dead signal socket, and neither
+    // side retries on its own once its timer has been parked for hours. Wake is observed where it
+    // reaches the window rather than guessed at with a poll: a focus or visibility change.
+    const onWake = (): void => { this.presence?.kick(); this.signal?.kick(); };
+    this.registerDomEvent(activeDocument, 'visibilitychange', () => {
+      if (activeDocument.visibilityState === 'visible') onWake();
+    });
+    this.registerDomEvent(activeWindow, 'focus', onWake);
     // One check a day is enough for a manual-install plugin; the notice is dismissible and never nagging.
     void this.checkForUpdate();
     this.registerInterval(window.setInterval(() => void this.checkForUpdate(), 6 * 60 * 60 * 1000));
@@ -386,7 +398,7 @@ export default class NoteRelayPlugin extends Plugin {
         : Platform.isLinux ? 'linux' : Platform.isMobile ? 'mobile' : 'desktop',
       hosting: this.hostEnabled,
       presence: this.remoteStatus === 'unpaired' ? 'unpaired'
-        : this.hostEnabled ? (this.remoteStatus === 'unavailable' ? 'unavailable' : 'active') : 'idle',
+        : this.hostEnabled ? (this.remoteStatus ?? 'active') : 'idle',
       lastClose: close,
       // The plugin does not track whether the peer is direct or relayed, and a bundle that guessed
       // would be worse than one that says so.
@@ -688,12 +700,18 @@ export default class NoteRelayPlugin extends Plugin {
       if (!key) { this.remoteStatus = 'unpaired'; this.setStatus(); return; }
       const presence = new HostPresenceClient(vaultId, sessionId, key,
         undefined, undefined,
-        reason => { if (this.host.sessionId === sessionId) {
-          this.remoteStatus = 'unavailable'; this.setStatus(); new Notice(reason);
+        (reason, terminal) => { if (this.host.sessionId === sessionId) {
+          // A refusal is recorded, not fatal: the client keeps retrying on its own backoff. The status
+          // bar names which refusal it is, because "unavailable" covered four unrelated causes and
+          // told the owner nothing to do.
+          this.remoteStatus = terminal ? 'blocked' : 'refused';
+          this.setStatus(); new Notice(reason);
         } },
         () => {
-          if (this.host.sessionId !== sessionId || this.signal) return;
-          this.remoteStatus = null; this.setStatus();
+          if (this.host.sessionId !== sessionId) return;
+          // A lease arrived: the vault can be reached again, whatever the last refusal said.
+          if (this.remoteStatus !== null) { this.remoteStatus = null; this.setStatus(); }
+          if (this.signal) { this.signal.kick(); return; }
           this.signal = new HostSignalClient(vaultId, sessionId, key,
             this.host, this.adapter, () => this.currentRemoteLease(),
             new ReaderWaitMonitor({
@@ -724,8 +742,10 @@ export default class NoteRelayPlugin extends Plugin {
   private statusText(): string {
     return !this.hostEnabled ? 'off' : this.readerWaiting ? READER_WAIT_STATUS
       : this.currentRemoteLease() ? 'remote presence active' : this.remoteStatus === 'unpaired'
-        ? 'hosting on; vault not paired' : this.remoteStatus === 'unavailable'
-          ? 'hosting on; remote unavailable' : 'hosting on; remote lease pending';
+        ? 'hosting on; vault not paired' : this.remoteStatus === 'blocked'
+          ? 'hosting on; plugin update required' : this.remoteStatus === 'refused'
+            ? 'hosting on; relay refused, retrying' : this.remoteStatus === 'unavailable'
+              ? 'hosting on; remote unavailable' : 'hosting on; remote lease pending';
   }
 
   private setStatus(): void {

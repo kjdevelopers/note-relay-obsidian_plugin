@@ -84,6 +84,19 @@ export class HostSignalClient {
     void this.connect();
   }
 
+  /**
+   * Reconnect now if the socket is down and a lease is held.
+   *
+   * A wake from sleep can leave both the presence lease and the socket dead, and the socket's own
+   * retry only reschedules while a lease exists. Called from the vault window's wake path; a live
+   * socket or a live timer makes it a no-op, so it never competes with the backoff.
+   */
+  kick(): void {
+    if (!this.active || this.socket || this.reconnectTimer) return;
+    if (!this.currentHost() || !this.lease()) return;
+    void this.connect();
+  }
+
   stop(): void {
     this.active = false;
     this.retryAttempt = 0;
