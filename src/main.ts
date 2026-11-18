@@ -301,7 +301,7 @@ export default class NoteRelayPlugin extends Plugin {
   private pairingFlowInstance: PairingFlow | null = null;
   private presence: HostPresenceClient | null = null;
   private signal: HostSignalClient | null = null;
-  private remoteStatus: 'unpaired' | 'refused' | 'blocked' | 'unavailable' | null = null;
+  private remoteStatus: 'unpaired' | 'refused' | 'unlinked' | 'blocked' | 'unavailable' | null = null;
   /** True only while the signal client can prove an authenticated reader is attached and stuck. */
   private readerWaiting = false;
   /** The account this vault is linked to, or null. Loaded once in onload and shown in the pane. */
@@ -700,11 +700,11 @@ export default class NoteRelayPlugin extends Plugin {
       if (!key) { this.remoteStatus = 'unpaired'; this.setStatus(); return; }
       const presence = new HostPresenceClient(vaultId, sessionId, key,
         undefined, undefined,
-        (reason, terminal) => { if (this.host.sessionId === sessionId) {
+        (reason, state) => { if (this.host.sessionId === sessionId) {
           // A refusal is recorded, not fatal: the client keeps retrying on its own backoff. The status
           // bar names which refusal it is, because "unavailable" covered four unrelated causes and
           // told the owner nothing to do.
-          this.remoteStatus = terminal ? 'blocked' : 'refused';
+          this.remoteStatus = state;
           this.setStatus(); new Notice(reason);
         } },
         () => {
@@ -743,9 +743,10 @@ export default class NoteRelayPlugin extends Plugin {
     return !this.hostEnabled ? 'off' : this.readerWaiting ? READER_WAIT_STATUS
       : this.currentRemoteLease() ? 'remote presence active' : this.remoteStatus === 'unpaired'
         ? 'hosting on; vault not paired' : this.remoteStatus === 'blocked'
-          ? 'hosting on; plugin update required' : this.remoteStatus === 'refused'
-            ? 'hosting on; relay refused, retrying' : this.remoteStatus === 'unavailable'
-              ? 'hosting on; remote unavailable' : 'hosting on; remote lease pending';
+          ? 'hosting on; plugin update required' : this.remoteStatus === 'unlinked'
+            ? 'hosting on; vault not linked, re-pair' : this.remoteStatus === 'refused'
+              ? 'hosting on; relay refused, retrying' : this.remoteStatus === 'unavailable'
+                ? 'hosting on; remote unavailable' : 'hosting on; remote lease pending';
   }
 
   private setStatus(): void {

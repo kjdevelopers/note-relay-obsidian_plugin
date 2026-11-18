@@ -11,6 +11,8 @@ const ORIGIN = WORKER_ORIGIN;
 type Reply = { expiresAtMs?: unknown; entitlementRevision?: unknown; stopped?: unknown };
 type Send = (proof: PresenceProof) => Promise<{ status: number; body: Reply }>;
 type Schedule = (handler: () => void, ms: number) => unknown;
+/** Why presence is not working, in the terms the status bar shows. */
+export type PresenceFailure = 'refused' | 'unlinked' | 'blocked';
 type Cancel = (handle: unknown) => void;
 
 /**
@@ -39,6 +41,15 @@ export const RETRY_START_MS = 5_000;
 export const RETRY_MAX_MS = 300_000;
 /** Doublings before the ceiling is reached. */
 const RETRY_STEPS = 7;
+/**
+ * How long a vault may keep being refused before the plugin says the likely cause out loud.
+ *
+ * A 403 outlives a transient — a clock jump, a row read at the wrong instant — within seconds, so a
+ * refusal still going two minutes later is almost always the vault's own link: its local identity is
+ * no longer the one the account holds (a reinstalled plugin folder, a copied vault). Retrying is still
+ * right, but the owner needs the instruction, not a spinner.
+ */
+export const UNLINKED_AFTER_MS = 120_000;
 
 export async function sendPresence(proof: PresenceProof): Promise<{ status: number; body: Reply }> {
   const response = await requestUrl({
@@ -81,10 +92,12 @@ export class HostPresenceClient {
   private current: Promise<void> = Promise.resolve();
   private lastIssuedAtMs = 0;
   private authorization: AuthorizationLease | null = null;
-  private failure: ((reason: string, terminal: boolean) => void) | null;
+  private failure: ((reason: string, state: PresenceFailure) => void) | null;
   private onLease: ((lease: AuthorizationLease) => void) | null;
   private attempt = 0;
   private failing = false;
+  private refusedSinceMs: number | null = null;
+  private saidUnlinked = false;
   /** The relay refused this build outright; renewing into that refusal is the cost the gate exists to stop. */
   private blocked = false;
   private inFlight = false;
@@ -92,7 +105,7 @@ export class HostPresenceClient {
   constructor(private vaultId: string, private sessionId: string,
     private key: StoredHostKey, private send: Send = sendPresence,
     private now: () => number = Date.now,
-    onFailure: ((reason: string, terminal: boolean) => void) | null = null,
+    onFailure: ((reason: string, state: PresenceFailure) => void) | null = null,
     onLease: ((lease: AuthorizationLease) => void) | null = null,
     private schedule: Schedule = setTimer,
     private cancel: Cancel = clearTimer) {
@@ -135,10 +148,10 @@ export class HostPresenceClient {
   }
 
   /** Report once per failing streak, so a retry loop cannot fill the corner with notices. */
-  private report(reason: string, terminal: boolean): void {
+  private report(reason: string, state: PresenceFailure): void {
     if (this.failing) return;
     this.failing = true;
-    this.failure?.(reason, terminal);
+    this.failure?.(reason, state);
   }
 
   /** A lease the server reported, or null when the reply is not something this client can trust. */
@@ -168,7 +181,7 @@ export class HostPresenceClient {
         this.authorization = null;
         this.blocked = true;
         if (this.timer) { this.cancel(this.timer); this.timer = null; }
-        this.report('This Note Relay plugin version is no longer supported. Update the plugin, then turn hosting off and on.', true);
+        this.report('This Note Relay plugin version is no longer supported. Update the plugin, then turn hosting off and on.', 'blocked');
         return;
       }
       const lease = result.status === 200 ? this.acceptLease(result.body) : null;
@@ -176,6 +189,8 @@ export class HostPresenceClient {
         this.authorization = lease;
         this.attempt = 0;
         this.failing = false;
+        this.refusedSinceMs = null;
+        this.saidUnlinked = false;
         this.onLease?.(lease);
       } else {
         retrying = true;
@@ -183,13 +198,24 @@ export class HostPresenceClient {
         // accept). They used to end presence permanently, which turned one bad renewal — a clock jump
         // after a sleep, a database read at the wrong moment — into a vault that stayed dark until the
         // owner toggled hosting. Retry, and say so once.
-        this.report(result.status === 403 || result.status === 404
-          ? 'Note Relay is retrying: the relay refused this vault. If this continues, check that the vault is still linked on noterelay.io.'
-          : 'Note Relay could not renew remote presence; retrying.', false);
+        const refused = result.status === 403 || result.status === 404;
+        const nowMs = this.now();
+        if (refused && this.refusedSinceMs === null) this.refusedSinceMs = nowMs;
+        if (refused && !this.saidUnlinked && nowMs - (this.refusedSinceMs ?? nowMs) >= UNLINKED_AFTER_MS) {
+          this.saidUnlinked = true;
+          // The streak is long enough to name the probable cause; keep retrying so a re-pair on the
+          // site is picked up without a reload.
+          this.failing = false;
+          this.report('This vault is no longer linked to your Note Relay account. Pair it again on noterelay.io — Note Relay keeps retrying until then.', 'unlinked');
+        } else {
+          this.report(refused
+            ? 'Note Relay is retrying: the relay refused this vault.'
+            : 'Note Relay could not renew remote presence; retrying.', 'refused');
+        }
       }
     } catch {
       retrying = true;
-      this.report('Note Relay could not reach the relay; retrying.', false);
+      this.report('Note Relay could not reach the relay; retrying.', 'refused');
     } finally {
       this.inFlight = false;
     }

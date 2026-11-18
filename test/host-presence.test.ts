@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { HostPresenceClient, MAX_ACCEPTED_LEASE_MS, RENEW_INTERVAL_MS, RETRY_MAX_MS,
-  RETRY_START_MS, WATCHDOG_MS, presenceDelayMs } from '../src/host-presence';
+  RETRY_START_MS, UNLINKED_AFTER_MS, WATCHDOG_MS, presenceDelayMs } from '../src/host-presence';
 import { generateHostPairingKey } from '../src/pairing-key';
 import type { StoredHostKey } from '../src/pairing-key-store';
 import type { PresenceProof } from '../src/host-presence-proof';
@@ -23,7 +23,7 @@ async function harness(replies: Array<{ status: number; body: Reply } | Error>, 
     publicJwk: generated.publicJwk };
   const sent: PresenceProof[] = [];
   const delays: number[] = [];
-  const failures: Array<{ reason: string; terminal: boolean }> = [];
+  const failures: Array<{ reason: string; state: string }> = [];
   const leases: number[] = [];
   const timers: Array<() => void> = [];
   const clock = { now: nowMs };
@@ -36,7 +36,7 @@ async function harness(replies: Array<{ status: number; body: Reply } | Error>, 
       return { status: next.status, body: next.body };
     },
     () => clock.now,
-    (reason, terminal) => { failures.push({ reason, terminal }); },
+    (reason, state) => { failures.push({ reason, state }); },
     lease => { leases.push(lease.expiresAtMs); },
     (handler, ms) => { delays.push(ms); timers.push(handler); return handler; },
     () => {});
@@ -81,7 +81,7 @@ test('a refused renewal is retried, not treated as the end of hosting', async ()
   h.client.start();
   await settle();
   assert.equal(h.failures.length, 1, 'the refusal is reported once');
-  assert.equal(h.failures[0].terminal, false);
+  assert.equal(h.failures[0].state, 'refused');
   assert.equal(h.delays.at(-1), RETRY_START_MS, 'the retry is scheduled, not dropped');
   assert.equal(h.timers.length, 1);
 
@@ -96,7 +96,7 @@ test('a blocked build stops instead of retrying into the refusal', async () => {
   h.client.start();
   await settle();
   assert.equal(h.failures.length, 1);
-  assert.equal(h.failures[0].terminal, true);
+  assert.equal(h.failures[0].state, 'blocked');
   assert.equal(h.timers.length, 0, 'no timer is scheduled after a terminal refusal');
   assert.equal(h.client.lease(), null);
 });
@@ -131,6 +131,24 @@ test('the watchdog renews as soon as the lease has lapsed, and only then', async
   await settle();
   assert.equal(h.sent.length, 2, 'kick renews immediately after a wake');
   assert.ok(h.client.lease());
+});
+
+test('a refusal that outlasts two minutes names the likely cause instead of looping', async () => {
+  // A vault whose local identity no longer matches the account's row is refused forever. Retrying is
+  // right; saying nothing is not — the owner needs to know to pair it again.
+  const base = 1_760_000_000_000;
+  const h = await harness([
+    { status: 403, body: {} }, { status: 403, body: {} }, { status: 403, body: {} },
+  ], base);
+  h.client.start();
+  await settle();
+  assert.equal(h.failures.at(-1)!.state, 'refused');
+
+  h.clock.now = base + UNLINKED_AFTER_MS + 1_000;
+  h.timers.at(-1)!();
+  await settle();
+  assert.equal(h.failures.at(-1)!.state, 'unlinked', 'the second refusal escalates after the window');
+  assert.equal(h.timers.length, 2, 'and it keeps retrying');
 });
 
 test('the schedule is a long renewal while a lease is held and a short watchdog when it is not', () => {
