@@ -369,6 +369,33 @@ function sanitizeHtmlOnly(html: string): string {
 export type DqlQuery = (query: string, originFile: string) => Promise<string>;
 
 /**
+ * What a render had to leave out.
+ *
+ * A note is the reader's, and no optional feature inside it — a Dataview query the host cannot run, a
+ * diagram, a pasted 300 KB listing — may cost them the whole note. The renderer degrades instead and
+ * says so here; the viewer shows it once above the note. One sentence, first cause wins: a banner that
+ * lists five reasons is noise nobody reads.
+ */
+export type PreviewReport = { notice: string | null };
+const MAX_NOTICE = 240;
+
+function noteNotice(report: PreviewReport | undefined, text: string): void {
+  if (!report || report.notice) return;
+  report.notice = text.length > MAX_NOTICE ? `${text.slice(0, MAX_NOTICE - 1)}…` : text;
+}
+
+/** The first `limit` bytes of `text`, cut on a line boundary and never inside a UTF-8 sequence. */
+export function truncateToBytes(text: string, limit: number): string {
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.length <= limit) return text;
+  const sliced = new TextDecoder('utf-8').decode(bytes.subarray(0, limit));
+  // TextDecoder replaces a split trailing sequence with U+FFFD, so prefer a newline before it.
+  const lastBreak = sliced.lastIndexOf('\n');
+  const withoutTail = sliced.replace(/\uFFFD+$/, '');
+  return lastBreak > withoutTail.length / 2 ? withoutTail.slice(0, lastBreak) : withoutTail;
+}
+
+/**
  * Resolves `![[picture.png]]` tokens collected by the inline rule.
  *
  * The target is a vault path exactly as the author wrote it, so it is resolved as-is — unlike a Markdown
@@ -425,7 +452,11 @@ async function resolveImages(tokens: ReturnType<typeof markdown.parse>, originFi
       const extension = raw.split('.').pop()?.toLowerCase() ?? '';
       const relative = raw.startsWith('/') ? raw.slice(1) : `${folder}${raw}`;
       const allowed = !raw.includes('://') && !!IMAGE_MIME[extension] && resolved < MAX_INLINE_IMAGES;
-      const image = allowed ? await resolve(relative) : null;
+      let image: Awaited<ReturnType<ImageResolver>> = null;
+      if (allowed) {
+        try { image = await resolve(relative); }
+        catch { image = null; }
+      }
       if (image && (image.mime === IMAGE_MIME[extension] || image.capped)) {
         child.type = 'nr_image';
         child.tag = '';
@@ -448,8 +479,27 @@ async function resolveImages(tokens: ReturnType<typeof markdown.parse>, originFi
 
 export async function renderStaticPreview(source: string, originFile: string, runDql: DqlQuery,
   resolveImage?: ImageResolver, resolveNote?: EmbedResolver,
-  renderMermaid?: MermaidRenderer): Promise<string> {
-  if (new TextEncoder().encode(source).length > MAX_PREVIEW_SOURCE) throw new Error('Preview source too large');
+  renderMermaid?: MermaidRenderer, report?: PreviewReport): Promise<string> {
+  // Over the preview budget the old renderer refused the note outright, and the reader was left with an
+  // error for a note they could read perfectly well in Obsidian. Render what fits and say what was cut.
+  let working = source;
+  if (new TextEncoder().encode(working).length > MAX_PREVIEW_SOURCE) {
+    working = truncateToBytes(working, MAX_PREVIEW_SOURCE);
+    noteNotice(report, 'This note is too large to render in full, so its first part is shown. Open it in Obsidian for the rest.');
+  }
+  try {
+    return await renderBody(working, originFile, runDql, resolveImage, resolveNote, renderMermaid, report);
+  } catch {
+    // Nothing in here is allowed to end the note. If the pipeline itself fails, show the text.
+    noteNotice(report, 'This note could not be laid out here, so its text is shown instead.');
+    try { return sanitizePreview(`<pre class="nr-plain-text">${escapeHtml(working)}</pre>`); }
+    catch { return `<pre class="nr-plain-text">${escapeHtml(working.slice(0, 20_000))}</pre>`; }
+  }
+}
+
+async function renderBody(source: string, originFile: string, runDql: DqlQuery,
+  resolveImage?: ImageResolver, resolveNote?: EmbedResolver,
+  renderMermaid?: MermaidRenderer, report?: PreviewReport): Promise<string> {
   // Transclusion runs first, so maths and Dataview inside an embedded note are rendered by the same
   // pass as the outer note rather than being shown as their own syntax.
   const embeds = await expandTransclusions(taskMarkers(withoutFrontmatter(source)),
@@ -457,15 +507,19 @@ export async function renderStaticPreview(source: string, originFile: string, ru
       // A raster embed belongs to the image path; resolving it here would inline an image as text.
       if (/\.(png|jpe?g|gif|webp|svg|pdf)$/i.test(target)) return null;
       if (!resolveNote) return null;
-      const found = await resolveNote(target);
-      return found === null ? null : taskMarkers(withoutEmbeddedFrontmatter(found));
+      try {
+        const found = await resolveNote(target);
+        return found === null ? null : taskMarkers(withoutEmbeddedFrontmatter(found));
+      } catch {
+        // One unreadable embed is a placeholder, not the end of the note that contains it.
+        noteNotice(report, 'An embedded note could not be read here and is shown as a link.');
+        return null;
+      }
     }, { originFile, leave: target => /\.(png|jpe?g|gif|webp|svg|pdf)$/i.test(target) });
   const math = extractMath(embeds.source);
   const tokens = markdown.parse(math.source, {});
   const dql = tokens.filter(token => token.type === 'fence' && token.info.trim().toLowerCase() === 'dataview');
-  if (dql.length > MAX_DQL_BLOCKS || dql.some(token => new TextEncoder().encode(token.content).length > MAX_DQL_QUERY)) {
-    throw new Error('Dataview query limit exceeded');
-  }
+  const dqlOverLimit = dql.length > MAX_DQL_BLOCKS;
   if (resolveImage) await resolveImages(tokens, originFile, resolveImage);
   if (resolveImage) await resolveEmbedImages(tokens, resolveImage);
   if (renderMermaid) {
@@ -481,11 +535,26 @@ export async function renderStaticPreview(source: string, originFile: string, ru
     }
   }
   for (const token of dql) {
-    const result = await runDql(token.content, originFile);
-    if (typeof result !== 'string') throw new Error('Invalid Dataview result');
-    if (new TextEncoder().encode(result).length > MAX_DQL_RESULT) throw new Error('Dataview result too large');
+    const source = `<pre class="nr-dql-source"><code>${escapeHtml(token.content)}</code></pre>`;
+    if (dqlOverLimit || new TextEncoder().encode(token.content).length > MAX_DQL_QUERY) {
+      noteNotice(report, 'A Dataview query was too large to run here and is shown as written.');
+      token.type = 'html_block'; token.content = source;
+      continue;
+    }
+    let rendered: string;
+    try {
+      const result = await runDql(token.content, originFile);
+      if (typeof result !== 'string') throw new Error('Invalid Dataview result');
+      if (new TextEncoder().encode(result).length > MAX_DQL_RESULT) throw new Error('Dataview result too large');
+      rendered = `<div class="block-language-dataview">${staticMarkdown.render(taskMarkers(staticWikiLabels(result)))}</div>`;
+    } catch {
+      // Dataview absent, a query that throws, a result too large: the note still renders, and the
+      // reader sees exactly what the author wrote.
+      noteNotice(report, 'A Dataview query could not be run here and is shown as written.');
+      rendered = source;
+    }
     token.type = 'html_block';
-    token.content = `<div class="block-language-dataview">${staticMarkdown.render(taskMarkers(staticWikiLabels(result)))}</div>`;
+    token.content = rendered;
   }
   // The embed count and the skipped list are not returned: the caller renders one note, and the
   // visible placeholders already say what was left out.

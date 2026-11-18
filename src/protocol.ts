@@ -81,7 +81,11 @@ export type WriteCommand = 'SAVE_NOTE' | 'CREATE_NOTE' | 'RENAME_NOTE' | 'MOVE_N
 export type Command = ReadCommand | WriteCommand;
 export type FileRef = { path: string; extension: string };
 export type Appearance = { mode: 'light' | 'dark'; tokens: Record<string, string> };
-export type Preview = { html: string; state: 'complete' | 'incomplete'; renderer: string };
+export type Preview = {
+  html: string; state: 'complete' | 'incomplete'; renderer: string;
+  /** One plain sentence about what was left out, for a note that rendered partially. */
+  notice?: string;
+};
 
 /** The scope a grant carries. Reads never need more than `read`. */
 export type AccessScope = 'read' | 'owner_write' | 'write';
@@ -182,6 +186,18 @@ const writeFields: Record<WriteCommand, string[]> = {
   DELETE_NOTE: ['version', 'id', 'cmd', 'path', 'hash'],
 };
 const rasterTypes: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
+
+/** A bounded single line of prose, or null. Control characters would break a status bar. */
+function plainNotice(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  let out = '';
+  for (const char of value.slice(0, 480)) {
+    if (out.length >= 240) break;
+    const code = char.codePointAt(0) ?? 0;
+    out += code < 0x20 || code === 0x7f ? ' ' : char;
+  }
+  return out.trim() || null;
+}
 
 export function validMarkdownPath(path: unknown): path is string {
   return validVaultPath(path) && path.endsWith('.md');
@@ -741,8 +757,12 @@ export async function dispatchVaultRequest(adapter: VaultAdapter, access: Access
       typeof preview.renderer !== 'string' || !/^[a-z0-9-]{1,64}$/.test(preview.renderer)) {
       return { ok: false, id, error: 'RENDER_FAILED' };
     }
+    // The notice is prose for a person, so it is bounded and flattened to one line rather than
+    // trusted: it is the one string here that originates inside the renderer.
+    const notice = plainNotice(preview.notice);
     if (byteLength(preview.html) > MAX_PREVIEW_BYTES) return { ok: false, id, error: 'TOO_LARGE' };
-    return { ok: true, id, data: { path, html: preview.html, state: preview.state, renderer: preview.renderer } };
+    return { ok: true, id, data: { path, html: preview.html, state: preview.state,
+      renderer: preview.renderer, ...(notice ? { notice } : {}) } };
   } catch {
     return { ok: false, id, error: 'RENDER_FAILED' };
   }

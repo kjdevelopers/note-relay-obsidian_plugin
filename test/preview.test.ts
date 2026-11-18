@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { JSDOM } from 'jsdom';
+import type { PreviewReport } from '../src/preview';
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>');
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, Node: dom.window.Node });
@@ -41,13 +42,48 @@ test('reading preview hides frontmatter while preserving the visible note body',
   assert.doesNotMatch(html, /interface\/nested|tags:|<hr>/);
 });
 
-test('query count and result size are bounded before output', async () => {
+test('a query the host will not run degrades to its source instead of failing the note', async () => {
+  // A note is the reader's. Eleven queries, an oversized result and a nonsense result each used to end
+  // the whole preview with RENDER_FAILED, so the note was unreadable for a reason the reader could not
+  // see. Each now renders as the text the author wrote, with one notice explaining it.
   const eleven = '```dataview\nLIST\n```\n'.repeat(11);
   let calls = 0;
-  await assert.rejects(renderStaticPreview(eleven, 'Test.md', async () => { calls++; return '- a'; }), /limit/);
-  assert.equal(calls, 0);
-  await assert.rejects(renderStaticPreview('```dataview\nLIST\n```', 'Test.md', async () => 'a'.repeat(129 * 1024)), /too large/);
-  await assert.rejects(renderStaticPreview('```dataview\nLIST\n```', 'Test.md', async () => undefined as unknown as string), /Invalid/);
+  const tooMany: PreviewReport = { notice: null };
+  const overLimit = await renderStaticPreview(eleven, 'Test.md',
+    async () => { calls++; return '- a'; }, undefined, undefined, undefined, tooMany);
+  assert.equal(calls, 0, 'no query runs past the block cap');
+  assert.match(overLimit, /LIST/, 'the query is still visible to the reader');
+  assert.match(tooMany.notice ?? '', /too large to run/);
+
+  const bigResult: PreviewReport = { notice: null };
+  const huge = await renderStaticPreview('```dataview\nLIST\n```', 'Test.md',
+    async () => 'a'.repeat(129 * 1024), undefined, undefined, undefined, bigResult);
+  assert.match(huge, /LIST/);
+  assert.ok(bigResult.notice);
+
+  const nonsense: PreviewReport = { notice: null };
+  const invalid = await renderStaticPreview('```dataview\nLIST\n```', 'Test.md',
+    async () => undefined as unknown as string, undefined, undefined, undefined, nonsense);
+  assert.match(invalid, /LIST/);
+  assert.ok(nonsense.notice);
+});
+
+test('a note larger than the preview budget renders its first part rather than nothing', async () => {
+  const source = `# Big\n\n${'a paragraph of pasted listing copy.\n\n'.repeat(6000)}`;
+  const report: PreviewReport = { notice: null };
+  const html = await renderStaticPreview(source, 'Big.md', async () => '', undefined, undefined, undefined, report);
+  assert.match(html, /Big/, 'the note still renders');
+  assert.match(report.notice ?? '', /too large to render in full/);
+  assert.ok(report.notice!.length <= 240, 'the notice is bounded');
+});
+
+test('a pipeline failure falls back to the note text', async () => {
+  const report: PreviewReport = { notice: null };
+  // A resolver that throws is the shape of every host-side failure inside the renderer.
+  const html = await renderStaticPreview('# Title\n\n![[Missing]]\n', 'Test.md', async () => '',
+    async () => { throw new Error('image read failed'); }, async () => { throw new Error('embed read failed'); },
+    undefined, report);
+  assert.match(html, /Title/);
 });
 
 test('last sanitizer removes unexpected active HTML and attributes', () => {

@@ -1,5 +1,5 @@
 import { App, TFile, TFolder } from 'obsidian';
-import { renderStaticPreview } from './preview';
+import { renderStaticPreview, type PreviewReport } from './preview';
 import { hasControlCharacter } from './characters';
 import { appearanceColors, appearanceFonts, safeAppearance, safeColor } from './appearance';
 import { DataviewGate } from './dataview-gate';
@@ -318,13 +318,16 @@ export class ObsidianAdapter implements WritableVaultAdapter {
   }
 
   async preview(file: FileRef, source: string): Promise<Preview> {
+    const report: PreviewReport = { notice: null };
     const html = await renderStaticPreview(source, file.path, async (query, origin) => {
       const api = installedDataview(this.app);
       if (!api) throw new Error('Dataview is unavailable');
       return this.dataview.run(() => api.tryQueryMarkdown(query, origin, { allowHtml: false }));
     }, async path => this.inlineImage(path), async target => this.embeddedNote(target),
-      this.mermaid);
-    return { html, state: 'complete', renderer: 'static-dql-v1' };
+      this.mermaid, report);
+    // `incomplete` is not an error: it is the note with something left out, said once in the notice.
+    return { html, state: report.notice ? 'incomplete' : 'complete', renderer: 'static-dql-v1',
+      ...(report.notice ? { notice: report.notice } : {}) };
   }
 
   /**
