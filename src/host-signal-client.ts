@@ -15,6 +15,14 @@ import { reconnectDelay, serverHintedDelay } from './reconnect';
 import type { HostCloseRecord } from './diagnostics';
 import type { ReaderWaitMonitor } from './host-waiting';
 
+/**
+ * How often a refused handshake may force a presence refresh.
+ *
+ * A room refuses a host whose lease predates the account's current entitlement revision; one refresh
+ * fixes it, so a second refusal inside this window is a different problem and must not become a loop.
+ */
+const REFRESH_AFTER_REFUSAL_MS = 15_000;
+
 const SIGNAL_URL = `${WORKER_SOCKET}/v1/signal`;
 const TURN_URL = `${WORKER_ORIGIN}/v1/turn-credentials`;
 const MAX_DATA_MESSAGE = 64 * 1024;
@@ -34,6 +42,8 @@ export class HostSignalClient {
   private reconnectTimer: unknown = null;
   /** Consecutive failed attempts, so the retry delay can grow and then reset on success. */
   private retryAttempt = 0;
+  /** When a refused handshake last forced a presence refresh, so the two cannot loop. */
+  private refusedAt = 0;
   /**
    * The most recent close of the signalling socket.
    *
@@ -74,7 +84,8 @@ export class HostSignalClient {
   constructor(private vaultId: string, private sessionId: string,
     private key: StoredHostKey, private host: HostLifecycle,
     private adapter: VaultAdapter, private lease: () => AuthorizationLease | null,
-    private readerWait?: ReaderWaitMonitor) {
+    private readerWait?: ReaderWaitMonitor,
+    private onAuthRefused: (() => void) | null = null) {
     this.currentHost = host.currentRequest();
   }
 
@@ -91,9 +102,11 @@ export class HostSignalClient {
    * retry only reschedules while a lease exists. Called from the vault window's wake path; a live
    * socket or a live timer makes it a no-op, so it never competes with the backoff.
    */
-  kick(): void {
-    if (!this.active || this.socket || this.reconnectTimer) return;
+  kick(force = false): void {
+    if (!this.active) return;
+    if (!force && (this.socket || this.reconnectTimer)) return;
     if (!this.currentHost() || !this.lease()) return;
+    if (this.reconnectTimer) { clearTimer(this.reconnectTimer); this.reconnectTimer = null; }
     void this.connect();
   }
 
@@ -140,6 +153,15 @@ export class HostSignalClient {
         // connected. The code and reason distinguish a busy vault from a rate limit from a lost
         // network, and nothing else in the product records them.
         this.lastClose = { code: event.code, reason: event.reason, at: Date.now() };
+        // A refused handshake is the only place a stale *entitlement revision* becomes visible: this
+        // client's own lease still looks live, so nothing would retry until it expired. Ask for a fresh
+        // presence lease before the next attempt — throttled, because a genuinely unlinked vault
+        // refuses every time and a renewal per attempt would be a loop.
+        if (event.code === 1008 && /Auth/i.test(event.reason ?? '') &&
+            Date.now() - this.refusedAt > REFRESH_AFTER_REFUSAL_MS) {
+          this.refusedAt = Date.now();
+          this.onAuthRefused?.();
+        }
         // The room forwards nothing to a host it does not hold, so the wait state cannot be seen any
         // more; leaving the last claim on screen would be a notice about a socket that is gone.
         this.readerWait?.disconnected();

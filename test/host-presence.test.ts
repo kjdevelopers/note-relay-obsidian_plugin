@@ -161,3 +161,21 @@ test('the schedule is a long renewal while a lease is held and a short watchdog 
   assert.equal(presenceDelayMs({ renewing: true, attempt: 1, leaseExpiresAtMs: null, nowMs }), RETRY_START_MS);
   assert.equal(presenceDelayMs({ renewing: true, attempt: 99, leaseExpiresAtMs: null, nowMs }), RETRY_MAX_MS);
 });
+
+test('refresh renews even while the client believes its lease is healthy', async () => {
+  // The lease can be live and still be unacceptable: the relay ties it to the account's entitlement
+  // revision, which nothing local observes. A refused handshake calls refresh().
+  const base = 1_760_000_000_000;
+  const h = await harness([
+    { status: 200, body: { expiresAtMs: base + 600_000, entitlementRevision: 1 } },
+    { status: 200, body: { expiresAtMs: base + 600_000, entitlementRevision: 2 } },
+  ], base);
+  h.client.start();
+  await settle();
+  assert.ok(h.client.lease());
+  assert.equal(h.client.lease()!.entitlementRevision, 1);
+
+  await h.client.refresh();
+  assert.equal(h.sent.length, 2, 'refresh does not wait for the interval');
+  assert.equal(h.client.lease()!.entitlementRevision, 2);
+});

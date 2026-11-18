@@ -716,7 +716,10 @@ export default class NoteRelayPlugin extends Plugin {
             this.host, this.adapter, () => this.currentRemoteLease(),
             new ReaderWaitMonitor({
               onChange: waiting => this.setReaderWaiting(sessionId, waiting),
-            }));
+            }),
+            // A refused handshake usually means this lease predates an entitlement change, which
+            // nothing local can see. Renew presence first, then retry the socket with the new lease.
+            () => { void this.presence?.refresh().then(() => this.signal?.kick(true)); });
           this.signal.start();
         });
       this.presence = presence;

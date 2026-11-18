@@ -142,6 +142,23 @@ export class HostPresenceClient {
     this.current = this.renew();
   }
 
+  /**
+   * Renew now, whatever this client currently holds, and report when the attempt has been answered.
+   *
+   * The relay ties a presence lease to the account's entitlement revision, and a revision change makes
+   * every lease written before it unacceptable to the room — while this client still believes its own
+   * lease is fine, because its expiry has not run out. Nothing here can see that change coming; the
+   * host discovers it when a socket handshake is refused, so that refusal has to be able to force a
+   * renewal instead of waiting out the five-minute interval.
+   */
+  async refresh(): Promise<void> {
+    if (!this.active || this.blocked) return;
+    if (this.timer) { this.cancel(this.timer); this.timer = null; }
+    this.attempt = 0;
+    this.current = this.renew();
+    await this.current.catch(() => {});
+  }
+
   private issuedAt(): number {
     this.lastIssuedAtMs = Math.max(this.now(), this.lastIssuedAtMs + 1);
     return this.lastIssuedAtMs;
