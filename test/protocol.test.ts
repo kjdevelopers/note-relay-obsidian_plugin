@@ -112,11 +112,14 @@ test('a folder page answers with that folder\'s own children, and nothing else',
   assert.equal(projects.ok, true);
   if (projects.ok) assert.deepEqual(projects.data, {
     entries: [{ kind: 'folder', path: 'Projects/Deep' }, { kind: 'file', path: 'Projects/Plan.md' }],
+    // The vault's own note count, not the folder's: a page reporting only its own rows is how an
+    // 18,843-note vault came to display "1001 notes" in the sidebar.
+    total: 4,
     nextCursor: null });
 
   // A folder nobody has is an empty page, not an error: the vault may have changed under the reader.
   const missing = await dispatchReadOnly(tree, true, { ...req('LIST_VAULT_TREE_PAGE'), path: 'Gone' });
-  if (missing.ok) assert.deepEqual(missing.data, { entries: [], nextCursor: null });
+  if (missing.ok) assert.deepEqual(missing.data, { entries: [], total: 4, nextCursor: null });
   // Path traversal and absolute paths are refused before any vault work.
   assert.deepEqual(await dispatchReadOnly(tree, true, { ...req('LIST_VAULT_TREE_PAGE'), path: '../etc' }),
     { ok: false, id: 'test-1', error: 'FORBIDDEN' });
@@ -127,7 +130,27 @@ test('a folder page answers with that folder\'s own children, and nothing else',
 test('empty tree returns one empty page', async () => {
   const empty: VaultAdapter = { ...adapter, listMarkdown: () => [], listFolders: () => [] };
   assert.deepEqual(await dispatchReadOnly(empty, true, req('LIST_VAULT_TREE_PAGE')),
-    { ok: true, id: 'test-1', data: { entries: [], nextCursor: null } });
+    { ok: true, id: 'test-1', data: { entries: [], total: 0, nextCursor: null } });
+});
+
+test('every tree page reports the vault total, not the page size', async () => {
+  // The reader sees one number: the vault's size. A page of 200 rows must not pass itself off as the
+  // whole vault, and a folder page must not report its own children as the total either.
+  const many: VaultAdapter = { ...adapter,
+    listMarkdown: () => Array.from({ length: 1_250 }, (_, n) => ({ path: `Notes/${n}.md`, extension: 'md' })),
+    listFolders: () => ['Notes'] };
+  const first = await dispatchReadOnly(many, true, req('LIST_VAULT_TREE_PAGE'));
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  const page = first.data as { entries: unknown[]; total: number };
+  assert.equal(page.entries.length, 200);
+  assert.equal(page.total, 1_250);
+  const folderPage = await dispatchReadOnly(many, true, { ...req('LIST_VAULT_TREE_PAGE'), path: 'Notes' });
+  if (folderPage.ok) {
+    const scoped = folderPage.data as { entries: unknown[]; total: number };
+    assert.equal(scoped.entries.length, 200);
+    assert.equal(scoped.total, 1_250);
+  }
 });
 
 test('tag metadata is bounded, paginated, read-only, hides internals, and rejects stale cursors', async () => {

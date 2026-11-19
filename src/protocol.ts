@@ -545,9 +545,14 @@ export async function dispatchVaultRequest(adapter: VaultAdapter, access: Access
     // flat walk is ~93 round trips and re-hashes the entire listing on every one of them.
     const folder = obj.path as string | undefined;
     const parentOf = (path: string) => path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+    // The vault's own note count, so the browser can say "1,001 of 18,843" instead of presenting the
+    // rows it happens to have loaded as the size of the vault. One array length, no extra I/O.
+    let noteTotal = 0;
     try {
+      const markdown = adapter.listMarkdown().filter(file => validMarkdownPath(file.path));
+      noteTotal = markdown.length;
       entries = [
-        ...adapter.listMarkdown().filter(file => validMarkdownPath(file.path))
+        ...markdown
           .filter(file => folder === undefined || parentOf(file.path) === folder)
           .map(file => {
             // The tags ride along with the entry: the browser then knows a note's tags exactly when
@@ -588,7 +593,8 @@ export async function dispatchVaultRequest(adapter: VaultAdapter, access: Access
     if (!Number.isSafeInteger(offset) || offset < 0 || (cursor && offset >= entries.length)) return { ok: false, id, error: 'BAD_REQUEST' };
     const page = entries.slice(offset, offset + TREE_PAGE_SIZE);
     const nextOffset = offset + page.length;
-    return { ok: true, id, data: { entries: page, nextCursor: nextOffset < entries.length ? `${revision}:${nextOffset}` : null } };
+    return { ok: true, id, data: { entries: page, total: noteTotal,
+      nextCursor: nextOffset < entries.length ? `${revision}:${nextOffset}` : null } };
   }
 
   if (cmd === 'LIST_TAG_METADATA_PAGE') {

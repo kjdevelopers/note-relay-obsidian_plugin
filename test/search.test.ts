@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MAX_QUERY_LENGTH, MAX_SEARCH_RESULTS, MAX_SNIPPET_LENGTH, excerpt, matchNote,
+import { MAX_QUERY_LENGTH, MAX_SEARCH_BYTES, MAX_SEARCH_MS, MAX_SEARCH_RESULTS, MAX_SNIPPET_LENGTH, excerpt, matchNote,
   parseQuery, rankMatches } from '../src/search';
 
 test('a query is an AND of terms, case-insensitive and order-free', () => {
@@ -82,4 +82,12 @@ test('searching does not depend on the file extension or path shape', () => {
   const terms = parseQuery('needle')!;
   assert.equal(matchNote('deep/folder/Note.md', 'a needle', terms) !== null, true);
   assert.equal(matchNote('Shallow.md', 'a needle', terms) !== null, true);
+});
+
+test('the scan budget covers a large vault, because a partial answer reads as "no match"', () => {
+  // 24 MiB stopped an 18,843-note vault at 16,413 notes: the reader was told nothing matched in notes
+  // that had never been opened. 128 MiB covers ~85,000 average notes; the time ceiling is what keeps a
+  // cold disk-bound scan from stalling the editor, and a truncated reply still says so.
+  assert.ok(MAX_SEARCH_BYTES >= 128 * 1024 * 1024, `search budget is ${MAX_SEARCH_BYTES}`);
+  assert.ok(MAX_SEARCH_MS >= 2_000 && MAX_SEARCH_MS <= 10_000, `time ceiling is ${MAX_SEARCH_MS}ms`);
 });

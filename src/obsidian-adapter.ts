@@ -6,7 +6,7 @@ import { DataviewGate } from './dataview-gate';
 import { FULL_RASTER_BYTES } from './protocol';
 import type { MermaidRenderer } from './mermaid';
 import { installedDataview } from './dataview-api';
-import { MAX_SEARCH_BYTES, MAX_SEARCH_RESULTS, YIELD_EVERY, matchNote, parseQuery, rankMatches,
+import { MAX_SEARCH_BYTES, MAX_SEARCH_MS, MAX_SEARCH_RESULTS, YIELD_EVERY, matchNote, parseQuery, rankMatches,
   type SearchReport } from './search';
 import { MAX_PROPERTY_VALUE, MAX_PROPERTY_VALUES, MAX_PROPERTIES, matchesRasterSignature,
   validMarkdownPath,
@@ -298,13 +298,15 @@ export class ObsidianAdapter implements WritableVaultAdapter {
     let scanned = 0;
     let bytes = 0;
     let truncated = false;
+    const startedAt = Date.now();
     for (const file of files) {
       const text = await this.app.vault.cachedRead(file);
       bytes += text.length;
       scanned += 1;
       const match = matchNote(file.path, text, terms);
       if (match) matches.push(match);
-      if (bytes >= MAX_SEARCH_BYTES || matches.length >= MAX_SEARCH_RESULTS) {
+      if (bytes >= MAX_SEARCH_BYTES || matches.length >= MAX_SEARCH_RESULTS
+        || Date.now() - startedAt >= MAX_SEARCH_MS) {
         // Stop at the cap, but only report truncation when notes were genuinely left unread.
         truncated = scanned < total;
         break;

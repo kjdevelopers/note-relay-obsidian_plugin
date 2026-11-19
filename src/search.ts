@@ -118,10 +118,20 @@ export type SearchReport = {
  * Bytes of note text a single search may read.
  *
  * Obsidian keeps note text in memory after its first read, so a warm vault scans at memory speed and
- * this budget is rarely reached. A cold vault — first search after launch — pays real disk I/O, and
- * a fixed budget keeps one search from stalling the editor for tens of seconds.
+ * this budget is rarely reached. It was 24 MiB, which on an 18,843-note vault stopped at 16,413 notes —
+ * 87% — and told the reader nothing matched in notes that had never been read. 128 MiB covers roughly
+ * 100,000 average notes; past that the reply says it was partial, which is honest either way.
  */
-export const MAX_SEARCH_BYTES = 24 * 1024 * 1024;
+export const MAX_SEARCH_BYTES = 128 * 1024 * 1024;
+
+/**
+ * Wall-clock ceiling for one search, whichever limit is reached first.
+ *
+ * The byte budget is the real guard for a warm vault; this one bounds a cold vault (first search after
+ * launch, real disk I/O) so a huge vault cannot stall typing for tens of seconds. Five seconds is longer
+ * than any warm scan takes and short enough that the reader sees a paused pane, not a hang.
+ */
+export const MAX_SEARCH_MS = 5_000;
 
 /** How many notes to read between yields, so the Obsidian UI stays responsive during a search. */
 export const YIELD_EVERY = 200;
