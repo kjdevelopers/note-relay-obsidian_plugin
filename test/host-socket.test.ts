@@ -209,3 +209,43 @@ function installFakes(): () => void {
     globals.RTCPeerConnection = priorPeer;
   };
 }
+
+test('a close that lands with no lease still recovers, without a toggle', async () => {
+  // The defect this pins, measured on a live vault on 2026-11-19: the socket is open, the retry
+  // timer has fired once and left its handle behind, and a close arrives while the lease is
+  // momentarily absent. Nothing scheduled a retry, and the supervision tick refused because a timer
+  // "was already pending" — so the vault stayed dark until the owner turned hosting off and on.
+  // The client's own timers are real, so this test spends about half a minute proving recovery.
+  const restore = installFakes();
+  try {
+    FakeSocket.instances = [];
+    FakePeer.instances = [];
+    let leaseMs: number | null = 600_000;
+    const generated = await generateHostPairingKey();
+    const key: StoredHostKey = { vaultId: VAULT_ID, privateKey: generated.privateKey,
+      publicJwk: generated.publicJwk };
+    const host = new HostLifecycle();
+    host.start();
+    const client = new HostSignalClient(VAULT_ID, host.sessionId!, key, host, adapter,
+      () => (leaseMs === null ? null : { expiresAtMs: Date.now() + leaseMs, entitlementRevision: 0 }));
+    client.start();
+    await until(() => FakeSocket.instances.length === 1, 'the first socket');
+    FakeSocket.instances[0].open();
+
+    // The lease lapses exactly as the room ends the session — the order does not matter, the
+    // combination is what used to be fatal. The retry that follows finds no lease and stays down.
+    leaseMs = null;
+    FakeSocket.instances[0].close(1000, 'Session ended');
+    await new Promise(resolve => setTimeout(resolve, 7_000));
+    assert.equal(FakeSocket.instances.length, 1, 'no socket while the lease is absent');
+
+    // The next presence renewal restores the lease; only the supervision tick can notice, and that
+    // tick is twenty seconds away, so this waits for it rather than for the helper's short window.
+    leaseMs = 600_000;
+    for (let waited = 0; waited < 40_000 && FakeSocket.instances.length < 2; waited += 500) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    assert.ok(FakeSocket.instances.length >= 2, 'a socket appears once the lease returns');
+    client.stop();
+  } finally { restore(); }
+});

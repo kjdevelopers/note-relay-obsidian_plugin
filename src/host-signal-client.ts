@@ -12,6 +12,9 @@ import type { VaultAdapter } from './protocol';
 import { WORKER_ORIGIN, WORKER_SOCKET } from './endpoints';
 import { clearTimer, setTimer } from './timers';
 import { reconnectDelay, serverHintedDelay } from './reconnect';
+
+/** How often a connected host checks that it is still the one the room holds. */
+const SUPERVISE_MS = 20_000;
 import type { HostCloseRecord } from './diagnostics';
 import type { ReaderWaitMonitor } from './host-waiting';
 
@@ -40,6 +43,7 @@ export class HostSignalClient {
   private usedGrantIds = new Set<string>();
   private pendingIce: RTCIceCandidateInit[] = [];
   private reconnectTimer: unknown = null;
+  private supervisor: unknown = null;
   /** Consecutive failed attempts, so the retry delay can grow and then reset on success. */
   private retryAttempt = 0;
   /** When a refused handshake last forced a presence refresh, so the two cannot loop. */
@@ -92,6 +96,33 @@ export class HostSignalClient {
   start(): void {
     if (this.active) return;
     this.active = true;
+    this.scheduleSupervision();
+    void this.connect();
+  }
+
+  /**
+   * The tick that notices a socket nobody is coming back for.
+   *
+   * Every other path is event-driven: a close schedules a retry, a wake calls `kick`. A state that
+   * loses both — a timer that fired while the lease was absent, or a close whose retry was refused —
+   * used to be permanent, and the owner's only remedy was to toggle hosting. Twenty seconds of a
+   * cheap check is the difference between "dark until I notice" and "back within half a minute".
+   * `unref` keeps the process free to exit where the runtime offers it (the test runner does).
+   */
+  private scheduleSupervision(): void {
+    const handle = setTimer(() => this.supervise(), SUPERVISE_MS);
+    (handle as { unref?: () => void }).unref?.();
+    this.supervisor = handle;
+  }
+
+  private supervise(): void {
+    if (this.supervisor) clearTimer(this.supervisor);
+    this.supervisor = null;
+    if (!this.active) return;
+    this.scheduleSupervision();
+    if (this.socket || this.reconnectTimer) return;
+    if (!this.currentHost() || !this.lease()) return;
+    this.note('supervisor: no socket, no retry');
     void this.connect();
   }
 
@@ -115,7 +146,8 @@ export class HostSignalClient {
     this.retryAttempt = 0;
     // Hosting was turned off, so any "a reader is waiting" claim is stale by definition.
     this.readerWait?.disconnected();
-    if (this.reconnectTimer) clearTimer(this.reconnectTimer);
+    if (this.reconnectTimer) { clearTimer(this.reconnectTimer); this.reconnectTimer = null; }
+    if (this.supervisor) { clearTimer(this.supervisor); this.supervisor = null; }
     this.socket?.close(); this.socket = null;
     this.closePeer();
   }
@@ -165,14 +197,26 @@ export class HostSignalClient {
         // The room forwards nothing to a host it does not hold, so the wait state cannot be seen any
         // more; leaving the last claim on screen would be a notice about a socket that is gone.
         this.readerWait?.disconnected();
-        if (!this.active || !this.currentHost() || !this.lease()) return;
+        // The lease is not part of this decision. A close can land while the lease is momentarily
+        // absent — a renewal in flight, a presence blip, or a room that ended the session just as the
+        // old lease expired — and returning here left the socket down with no retry scheduled, so the
+        // vault stayed dark until the owner toggled hosting (2026-11-19). `connect()` is the guard
+        // that needs a lease; this line only needs to know the host is still meant to be connected.
+        if (!this.active || !this.currentHost()) return;
         // A flat retry here was twelve attempts a minute against a six-a-minute budget, so one host in
         // a loop could refuse every browser behind the same public IP. Back off, jitter, cap — and when
         // the server names a wait, honour it exactly.
         this.retryAttempt += 1;
         const hinted = serverHintedDelay(event.reason);
         const delay = hinted ?? reconnectDelay(this.retryAttempt);
-        this.reconnectTimer = setTimer(() => { void this.connect(); }, delay);
+        // Clear the handle *before* reconnecting. A fired timer left in this field makes `start()`
+        // and the supervision tick both believe a retry is already pending, so after the first
+        // reconnect nothing could ever heal a later close — the vault stayed dark until the owner
+        // toggled hosting (measured 2026-11-19: socket open, reconnectTimer still set, attempt 0).
+        this.reconnectTimer = setTimer(() => {
+          this.reconnectTimer = null;
+          void this.connect();
+        }, delay);
       };
       socket.onerror = () => socket.close();
     } catch { /* A later lease renewal can retry without enabling vault access. */ }

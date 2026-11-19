@@ -36,6 +36,9 @@ export const RENEW_LEAD_MS = 60_000;
 /** How soon to look again once the lease has lapsed and nothing is held. */
 export const WATCHDOG_MS = 15_000;
 
+/** How often the presence loop checks that its own chain is still alive. */
+export const WATCHDOG_TICK_MS = 20_000;
+
 /** A refused renewal backs off, but never stops: one refusal must not end hosting for the night. */
 export const RETRY_START_MS = 5_000;
 export const RETRY_MAX_MS = 300_000;
@@ -101,6 +104,7 @@ export class HostPresenceClient {
   /** The relay refused this build outright; renewing into that refusal is the cost the gate exists to stop. */
   private blocked = false;
   private inFlight = false;
+  private watchdog: unknown = null;
 
   constructor(private vaultId: string, private sessionId: string,
     private key: StoredHostKey, private send: Send = sendPresence,
@@ -122,6 +126,35 @@ export class HostPresenceClient {
     this.active = true;
     this.blocked = false;
     this.attempt = 0;
+    this.current = this.renew();
+  }
+
+  /**
+   * The tick that notices a renewal nobody is coming back for.
+   *
+   * The renew chain is a chain: each successful renewal schedules the next one. If one link is lost —
+   * a timer that fired into an in-flight request, a window that was hidden exactly then, a thrown
+   * error outside the try — the vault keeps saying "hosting on; remote lease pending" forever and the
+   * only remedy is turning hosting off and on. Measured on a live vault on 2026-11-19: renewals
+   * stopped, the status bar stayed on that line, and nothing resumed for eight minutes. This tick
+   * costs a local timer and sends nothing while a healthy lease is held.
+   */
+  private startWatchdog(): void {
+    if (this.watchdog) this.cancel(this.watchdog);
+    const handle = this.schedule(() => this.watch(), WATCHDOG_TICK_MS);
+    (handle as { unref?: () => void }).unref?.();
+    this.watchdog = handle;
+  }
+
+  private watch(): void {
+    this.watchdog = null;
+    if (!this.active) return;
+    this.startWatchdog();
+    if (this.blocked || this.inFlight) return;
+    const lease = this.lease();
+    if (lease && lease.expiresAtMs - this.now() > RENEW_LEAD_MS) return;
+    this.note('watchdog: renewing');
+    if (this.timer) { this.cancel(this.timer); this.timer = null; }
     this.current = this.renew();
   }
 
@@ -157,6 +190,14 @@ export class HostPresenceClient {
     this.attempt = 0;
     this.current = this.renew();
     await this.current.catch(() => {});
+  }
+
+  /** Why presence last did something, for the diagnostics panel. Bounded, and never a secret. */
+  private readonly events: string[] = [];
+  debugTail(count = 40): string[] { return this.events.slice(-count); }
+  private note(event: string): void {
+    this.events.push(`${new Date().toISOString().slice(11, 23)} ${event}`);
+    if (this.events.length > 200) this.events.splice(0, this.events.length - 200);
   }
 
   private issuedAt(): number {
@@ -209,6 +250,9 @@ export class HostPresenceClient {
         this.refusedSinceMs = null;
         this.saidUnlinked = false;
         this.onLease?.(lease);
+        // Nothing to watch until a lease exists: before that the renew chain itself is the only
+        // scheduler, and a watchdog here would only duplicate its work.
+        this.startWatchdog();
       } else {
         retrying = true;
         // 403 and 404 are the relay's refusals of this vault (unlinked, revoked, or a proof it did not
@@ -242,7 +286,12 @@ export class HostPresenceClient {
       ? presenceDelayMs({ renewing: true, attempt: ++this.attempt, leaseExpiresAtMs: null, nowMs: this.now() })
       : presenceDelayMs({ renewing: false, attempt: 0,
         leaseExpiresAtMs: leaseNow?.expiresAtMs ?? null, nowMs: this.now() });
-    this.timer = this.schedule(() => { this.current = this.renew(); }, delay);
+    // Clear the handle as the timer fires. A fired timer left in this field is indistinguishable
+    // from a pending one, and the loop then looked armed while nothing was scheduled at all.
+    this.timer = this.schedule(() => {
+      this.timer = null;
+      this.current = this.renew();
+    }, delay);
   }
 
   async stop(): Promise<void> {
@@ -251,6 +300,7 @@ export class HostPresenceClient {
     this.authorization = null;
     this.blocked = false;
     if (this.timer) { this.cancel(this.timer); this.timer = null; }
+    if (this.watchdog) { this.cancel(this.watchdog); this.watchdog = null; }
     await this.current.catch(() => {});
     try {
       const proof = await signPresence('stop', this.vaultId,

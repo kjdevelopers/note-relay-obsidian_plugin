@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { HostPresenceClient, MAX_ACCEPTED_LEASE_MS, RENEW_INTERVAL_MS, RETRY_MAX_MS,
-  RETRY_START_MS, UNLINKED_AFTER_MS, WATCHDOG_MS, presenceDelayMs } from '../src/host-presence';
+  RETRY_START_MS, UNLINKED_AFTER_MS, WATCHDOG_MS, WATCHDOG_TICK_MS, presenceDelayMs }
+  from '../src/host-presence';
 import { generateHostPairingKey } from '../src/pairing-key';
 import type { StoredHostKey } from '../src/pairing-key-store';
 import type { PresenceProof } from '../src/host-presence-proof';
@@ -178,4 +179,26 @@ test('refresh renews even while the client believes its lease is healthy', async
   await h.client.refresh();
   assert.equal(h.sent.length, 2, 'refresh does not wait for the interval');
   assert.equal(h.client.lease()!.entitlementRevision, 2);
+});
+
+test('a presence chain that stopped scheduling is restarted by the watchdog', async () => {
+  // Measured on a live vault on 2026-11-19: renewals stopped, the status bar sat on "hosting on;
+  // remote lease pending", and nothing resumed for eight minutes. The chain is a chain — one lost
+  // link is permanent without a tick that does not depend on it.
+  const base = 1_760_000_000_000;
+  const h = await harness([
+    { status: 200, body: { expiresAtMs: base + 60_000, entitlementRevision: 0 } },
+    { status: 200, body: { expiresAtMs: base + 11 * 60_000, entitlementRevision: 0 } },
+  ]);
+  h.client.start();
+  await settle();
+  assert.equal(h.sent.length, 1, 'the first renewal went out');
+  const watchdog = h.delays.indexOf(WATCHDOG_TICK_MS);
+  assert.ok(watchdog >= 0, 'a watchdog tick is armed at start');
+
+  // The renewal chain dies: no timer of its own is left, and the lease has lapsed.
+  h.clock.now = base + 10 * 60_000;
+  h.timers[watchdog]();
+  await settle();
+  assert.equal(h.sent.length, 2, 'the watchdog renews when the chain is gone');
 });
