@@ -242,6 +242,25 @@ export class HostSignalClient {
     }
   }
 
+  /**
+   * Adopt the epoch the API reports, if it is newer than the one being served.
+   *
+   * Never lowering: an epoch only moves forward, and a host that talked itself backwards would serve
+   * a round the relay has already retired.
+   */
+  private async syncAuthority(): Promise<void> {
+    try {
+      const state = await this.authorityCache.ensure();
+      const serving = this.authority.current();
+      if (serving === null || state.epoch > serving) {
+        this.authority.adopt(state.epoch);
+        this.note(`authority synced epoch=${state.epoch} state=${state.state}`);
+      }
+    } catch {
+      // Nothing to adopt. The request boundary fails closed, which is the safety property.
+    }
+  }
+
   /** The authority the API reports for this vault, authenticated by the host's own proof. */
   private async fetchAuthority(): Promise<AuthorityState> {
     const proof = await signHostSignalProof(this.vaultId, this.sessionId, this.key);
@@ -285,6 +304,10 @@ export class HostSignalClient {
           // A socket that opened and authenticated is a working connection: the next failure should
           // start again from the minimum wait rather than from wherever the last outage reached.
           this.retryAttempt = 0;
+          // Learn the epoch from the API as well as from `ready`. A host that reconnects into a room
+          // that already holds a reader is not sent a fresh `ready`, so this is the only thing that
+          // stops its first answer being refused as a stale frame.
+          void this.syncAuthority();
         } else socket.close();
       };
       socket.onmessage = event => { void this.onSignal(event.data).catch(() => this.closePeer()); };
@@ -308,8 +331,13 @@ export class HostSignalClient {
         // The room forwards nothing to a host it does not hold, so the wait state cannot be seen any
         // more; leaving the last claim on screen would be a notice about a socket that is gone.
         this.readerWait?.disconnected();
-        // The session that named an epoch is over; nothing is authorised until a new `ready` does.
-        this.authority.clear();
+        // The epoch is *not* forgotten here. It describes the vault's ownership, not this socket: a
+        // reconnect that dropped it answered the reader's next offer with no epoch, the room refused
+        // that as `stale epoch` (4409) and closed the socket, and the host reconnected into the same
+        // state — a loop in which the reader waits twenty seconds at a time forever (measured
+        // 2026-11-20: `stale-frame {role: host, epoch: 0, current: 2}` six times in one second). Only
+        // the cache is invalidated, so the next frame re-reads the truth from the API; serving a
+        // superseded epoch is refused at the request boundary below.
         this.authorityCache.invalidate();
         // The lease is not part of this decision. A close can land while the lease is momentarily
         // absent — a renewal in flight, a presence blip, or a room that ended the session just as the
@@ -338,7 +366,9 @@ export class HostSignalClient {
 
   private sendSignal(type: 'answer' | 'ice' | 'end' | 'established', data: string): void {
     if (this.socket?.readyState !== WebSocket.OPEN || !this.currentHost() || !this.lease()) return;
-    this.socket.send(JSON.stringify({ type, data }));
+    // The epoch travels with every frame so the relay can refuse a reader from a previous round
+    // without having to guess which socket belongs to which authority.
+    this.socket.send(JSON.stringify({ type, data, epoch: this.authority.current() ?? undefined }));
   }
 
   private async turnCredentials(): Promise<RTCIceServer[]> {

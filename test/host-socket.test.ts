@@ -249,3 +249,30 @@ test('a close that lands with no lease still recovers, without a toggle', async 
     client.stop();
   } finally { restore(); }
 });
+
+test('a host that reconnects answers with the epoch it was serving, not with none', async t => {
+  // Measured on the live relay on 2026-11-20: after one socket close, every answer went out with no
+  // epoch, the room refused each one as `stale epoch` (4409) and closed the socket again — the reader
+  // waited in twenty-second cycles and never received a channel. The room only sends `ready` when a
+  // reader arrives or a teardown completes, so a host that reconnects into a held room learns nothing
+  // from it; the epoch it already knew has to survive the socket.
+  const restore = installFakes();
+  t.after(restore);
+  const { client, socket } = await connect();
+  socket.deliver({ type: 'ready', epoch: 2 });
+  socket.close(4409, 'stale epoch');
+  // The retry is scheduled on a real timer; `kick(true)` is the same reconnect the supervisor would
+  // make, without the twenty-second wait.
+  client.kick(true);
+  await until(() => FakeSocket.instances.length === 2, 'the reconnecting socket');
+  const second = FakeSocket.instances[1];
+  second.open();
+  second.deliver({ type: 'offer', data: OFFER_SDP });
+  await until(() => second.sent.some(frame => (JSON.parse(frame) as { type: string }).type === 'answer'),
+    'the answer on the second socket');
+  const answer = second.sent
+    .map(frame => JSON.parse(frame) as { type: string; epoch?: number })
+    .find(frame => frame.type === 'answer');
+  assert.equal(answer?.epoch, 2, 'the answer must name the epoch this host is serving');
+  client.stop();
+});
