@@ -1,5 +1,5 @@
 import { decodeJwt } from 'jose';
-import { Notice } from 'obsidian';
+import { Notice, requestUrl } from 'obsidian';
 import { HostLifecycle } from './host-lifecycle';
 import { AuthenticatedReadSession, type AuthorizationLease } from './authenticated-read-session';
 import { hostPairingKeyId } from './pairing-key';
@@ -8,10 +8,13 @@ import { importPinnedGrantKeys } from './grant-keys';
 import { signHostSignalProof, signHostTurnProof } from './host-signal-proof';
 import { validMarkdownPath } from './protocol';
 import type { VaultAdapter } from './protocol';
+import { AuthorityCache, AuthorityEpoch, type AuthorityState } from './host-authority';
+import { signTeardownAck, type TeardownAck } from './host-teardown-proof';
 
 import { WORKER_ORIGIN, WORKER_SOCKET } from './endpoints';
 import { clearTimer, setTimer } from './timers';
 import { reconnectDelay, serverHintedDelay } from './reconnect';
+import { pluginHeaders, pluginVersion } from './client-version';
 
 /** How often a connected host checks that it is still the one the room holds. */
 const SUPERVISE_MS = 20_000;
@@ -28,9 +31,14 @@ const REFRESH_AFTER_REFUSAL_MS = 15_000;
 
 const SIGNAL_URL = `${WORKER_SOCKET}/v1/signal`;
 const TURN_URL = `${WORKER_ORIGIN}/v1/turn-credentials`;
+const AUTHORITY_URL = `${WORKER_ORIGIN}/v1/authority`;
 const MAX_DATA_MESSAGE = 64 * 1024;
 
-type WireSignal = { type: 'ready' | 'peer-left' | 'offer' | 'relay-offer' | 'answer' | 'ice' | 'end'; data?: string };
+type WireSignal = {
+  type: 'ready' | 'peer-left' | 'offer' | 'relay-offer' | 'answer' | 'ice' | 'end' | 'teardown';
+  data?: string; epoch?: number; nonce?: string; reader_key?: string | null;
+  reason?: string; grace_ms?: number;
+};
 
 // Only a paired, explicitly started host opens this socket. The signaling
 // channel never processes vault commands; all commands use the proven peer.
@@ -58,6 +66,16 @@ export class HostSignalClient {
   private lastClose: HostCloseRecord | null = null;
   lastCloseRecord(): HostCloseRecord | null { return this.lastClose; }
   private peerGeneration = 0;
+  /**
+   * The authority epoch this host is serving.
+   *
+   * `null` until a `ready` or `teardown` names one. Every frame a reader sends must carry this epoch,
+   * and the moment a newer epoch is learned the older reader's frames stop being served — the host is
+   * the last line of defence, so a relay that admitted two readers could not put two peers on a vault.
+   */
+  private authority = new AuthorityEpoch();
+  /** Authority as the API reports it: verified at most once every sixty seconds, then refused. */
+  private authorityCache = new AuthorityCache(() => this.fetchAuthority());
   /**
    * The note this reader is currently displaying, as it last told us.
    *
@@ -161,6 +179,89 @@ export class HostSignalClient {
     this.pendingIce = [];
   }
 
+  /**
+   * Close the peer and report what was observed, for the teardown attestation.
+   *
+   * The state read after `closePeer` returns is the strongest local evidence that exists: the channel
+   * and the connection both report their own teardown synchronously. Anything short of that is
+   * `timeout`, which the relay refuses — "I could not tell" must never read as "it is gone".
+   */
+  private closePeerAndObserve(): { proof: 'closed' | 'absent' | 'timeout';
+    channelState: string; peerState: string; msSinceClose: number } {
+    const channel = this.channel;
+    const peer = this.peer;
+    if (!channel && !peer) {
+      return { proof: 'absent', channelState: 'none', peerState: 'none', msSinceClose: 0 };
+    }
+    const started = Date.now();
+    this.closePeer('teardown requested');
+    const channelState = String(channel?.readyState ?? 'unknown');
+    const peerState = String(peer?.connectionState ?? 'unknown');
+    const gone = channelState === 'closed' || peerState === 'closed' || peerState === 'failed';
+    return { proof: gone ? 'closed' : 'timeout', channelState, peerState,
+      msSinceClose: Date.now() - started };
+  }
+
+  /**
+   * Answer the relay's teardown request with a signed statement about this host's own peer.
+   *
+   * The signature binds vault, epoch, nonce, session and reader — the relay checks all five, so a
+   * replay from an earlier round or a statement about a different reader cannot authorise anyone. The
+   * epoch is adopted only for a proof that actually attests a closed peer: a `timeout` says nothing
+   * about the vault and must not move this host's authority.
+   */
+  private async handleTeardown(signal: WireSignal): Promise<void> {
+    const epoch = Number(signal.epoch);
+    const nonce = typeof signal.nonce === 'string' ? signal.nonce : '';
+    if (!Number.isSafeInteger(epoch) || epoch < 1 || nonce === '' || nonce.length > 128) {
+      this.note('teardown malformed');
+      return;
+    }
+    const observed = this.closePeerAndObserve();
+    const ack: TeardownAck = {
+      v: 2,
+      vault_id: this.vaultId,
+      epoch,
+      prev_epoch: epoch - 1,
+      nonce,
+      host_session_id: this.sessionId,
+      reader_key: signal.reader_key ?? null,
+      proof: observed.proof,
+      observed: { channel_state: observed.channelState, peer_state: observed.peerState,
+        ms_since_close: observed.msSinceClose },
+    };
+    const signed = await signTeardownAck(this.key, ack);
+    try { this.socket?.send(JSON.stringify({ type: 'teardown-ack', ack: signed })); }
+    catch { this.note('teardown-ack unsent'); }
+    if (observed.proof === 'closed' || observed.proof === 'absent') {
+      this.authority.adopt(epoch);
+      this.authorityCache.invalidate();
+      this.note(`teardown attested ${observed.proof} epoch=${epoch}`);
+    } else {
+      this.note('teardown could not be attested');
+    }
+  }
+
+  /** The authority the API reports for this vault, authenticated by the host's own proof. */
+  private async fetchAuthority(): Promise<AuthorityState> {
+    const proof = await signHostSignalProof(this.vaultId, this.sessionId, this.key);
+    // `requestUrl`, not `fetch`: it is the only request path Obsidian sanctions, and it is the one the
+    // rest of this plugin already uses for the same reason.
+    const response = await requestUrl({
+      url: AUTHORITY_URL,
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...pluginHeaders() },
+      body: JSON.stringify({ role: 'host', proof }),
+      throw: false,
+    });
+    if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status}`);
+    const body = response.json as { epoch?: unknown; state?: unknown; holder?: unknown };
+    if (!Number.isSafeInteger(body.epoch)) throw new Error('Invalid authority');
+    return { epoch: body.epoch as number,
+      state: typeof body.state === 'string' ? body.state : '',
+      holder: typeof body.holder === 'string' ? body.holder : null };
+  }
+
   private async connect(): Promise<void> {
     if (!this.active || !this.currentHost() || !this.lease()) return;
     try {
@@ -170,7 +271,17 @@ export class HostSignalClient {
       this.socket = socket;
       socket.onopen = () => {
         if (this.active && this.currentHost() && this.lease()) {
-          socket.send(JSON.stringify({ type: 'auth', role: 'host', proof }));
+          // `pluginVersion` is additive: a Worker that predates the gate ignores the extra key, and
+          // one that understands it can tell this build apart from a build that is misbehaving.
+          const version = pluginVersion();
+          // `protocol` is what the relay decides on, not the version string: a plugin build's patch
+          // number says nothing about whether it can attest a teardown, and reading one as if it did
+          // would refuse every 0.2.x build forever.
+          socket.send(JSON.stringify({
+            type: 'auth', role: 'host', proof,
+            protocol: 2, capabilities: ['teardown-ack-v1'],
+            ...(version === null ? {} : { pluginVersion: version }),
+          }));
           // A socket that opened and authenticated is a working connection: the next failure should
           // start again from the minimum wait rather than from wherever the last outage reached.
           this.retryAttempt = 0;
@@ -197,6 +308,9 @@ export class HostSignalClient {
         // The room forwards nothing to a host it does not hold, so the wait state cannot be seen any
         // more; leaving the last claim on screen would be a notice about a socket that is gone.
         this.readerWait?.disconnected();
+        // The session that named an epoch is over; nothing is authorised until a new `ready` does.
+        this.authority.clear();
+        this.authorityCache.invalidate();
         // The lease is not part of this decision. A close can land while the lease is momentarily
         // absent — a renewal in flight, a presence blip, or a room that ended the session just as the
         // old lease expired — and returning here left the socket down with no retry scheduled, so the
@@ -248,9 +362,26 @@ export class HostSignalClient {
     if (!signal || typeof signal !== 'object') return;
     // The room sends `ready` only once it holds both sockets, so this frame is the honest arrival
     // signal: an authenticated browser is attached to this vault right now.
-    if (signal.type === 'ready') { this.readerWait?.readerArrived(); return; }
+    // A `ready` names the epoch this host is serving. It is adopted before anything else is done with
+    // the frame, because every later frame is judged against it.
+    if (signal.type === 'ready') {
+      if (Number.isSafeInteger(signal.epoch)) this.authority.adopt(Number(signal.epoch));
+      this.authorityCache.invalidate();
+      this.readerWait?.readerArrived();
+      return;
+    }
+    // The relay asking this host to retire its peer before another reader is admitted. Answered with
+    // a signed statement about this host's own channel; nothing else in the product can answer it.
+    if (signal.type === 'teardown') { await this.handleTeardown(signal); return; }
     if (signal.type === 'peer-left') { this.readerWait?.readerLeft(); this.closePeer(); return; }
     if (signal.type === 'end') return;
+    // A frame from a round this host has already left is dropped rather than served: a reader whose
+    // epoch was superseded is not this vault's reader any more, whatever its socket still believes.
+    if (signal.epoch !== undefined && !this.authority.allows(signal.epoch)) {
+      this.note(`stale epoch frame ${String(signal.type)} epoch=${String(signal.epoch)} ` +
+        `current=${String(this.authority.current())}`);
+      return;
+    }
     if ((signal.type === 'offer' || signal.type === 'relay-offer') && typeof signal.data === 'string') {
       // An offer can only come from the browser role, and a reader that renegotiates sends one
       // without a fresh `ready`; count it as an arrival so a stalled recovery is still reported.
@@ -412,6 +543,27 @@ export class HostSignalClient {
       return;
     }
     if (message.type === 'request' && Object.keys(message).sort().join(',') === 'input,type') {
+      // Authority is re-checked at the request boundary, not at connect time. The answer is trusted
+      // for at most sixty seconds; past that, and whenever the check itself fails, the request is
+      // refused and the channel closed. That is the fail-closed rule the design committed to.
+      let state: AuthorityState;
+      try { state = await this.authorityCache.ensure(); }
+      catch (error) { this.note(`authority unverifiable ${String((error as Error)?.message ?? error)}`); channel.close(); return; }
+      const serving = this.authority.current();
+      if (serving !== null && state.epoch > serving) {
+        // A newer round exists. This host adopts it and stops serving the reader it was serving:
+        // whatever the relay believes, one vault does not answer two epochs.
+        this.authority.adopt(state.epoch);
+        this.note(`authority superseded ${serving}->${state.epoch}`);
+        this.closePeer('authority superseded');
+        channel.close();
+        return;
+      }
+      if (serving === null) this.authority.adopt(state.epoch);
+      if (state.state !== 'held' || !this.authority.allows(state.epoch)) {
+        this.note(`authority refuses ${state.state} epoch=${state.epoch}`);
+        channel.close(); return;
+      }
       await this.readSession.send(channel, message.input);
       return;
     }
