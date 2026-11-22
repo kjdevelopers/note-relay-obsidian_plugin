@@ -400,6 +400,8 @@ export default class NoteRelayPlugin extends Plugin {
       presence: this.remoteStatus === 'unpaired' ? 'unpaired'
         : this.hostEnabled ? (this.remoteStatus ?? 'active') : 'idle',
       lastClose: close,
+      relay: this.signal?.relayState(),
+      lastDrop: this.signal?.lastDropRecord() ?? null,
       // The plugin does not track whether the peer is direct or relayed, and a bundle that guessed
       // would be worse than one that says so.
       transport: null,
@@ -719,7 +721,10 @@ export default class NoteRelayPlugin extends Plugin {
             }),
             // A refused handshake usually means this lease predates an entitlement change, which
             // nothing local can see. Renew presence first, then retry the socket with the new lease.
-            () => { void this.presence?.refresh().then(() => this.signal?.kick(true)); });
+            () => { void this.presence?.refresh().then(() => this.signal?.kick(true)); },
+            // No lease at all: the next scheduled renewal can be five minutes away, and nothing opens
+            // a socket without one. A network switch is exactly when that window opens.
+            () => { this.presence?.kick(); });
           this.signal.start();
         });
       this.presence = presence;
@@ -743,8 +748,14 @@ export default class NoteRelayPlugin extends Plugin {
   }
 
   private statusText(): string {
+    // "remote presence active" is a lease, and a lease outlives its socket by five minutes: the owner
+    // saw that green line while the relay had no host connection at all. The socket is reported beside
+    // it now, so the indicator cannot claim a connection the vault does not have.
+    const relay = this.signal?.relayState();
+    const reached = relay === 'connected' ? '' : relay === undefined || relay === 'off' ? ''
+      : '; relay reconnecting';
     return !this.hostEnabled ? 'off' : this.readerWaiting ? READER_WAIT_STATUS
-      : this.currentRemoteLease() ? 'remote presence active' : this.remoteStatus === 'unpaired'
+      : this.currentRemoteLease() ? `remote presence active${reached}` : this.remoteStatus === 'unpaired'
         ? 'hosting on; vault not paired' : this.remoteStatus === 'blocked'
           ? 'hosting on; plugin update required' : this.remoteStatus === 'unlinked'
             ? 'hosting on; vault not linked, re-pair' : this.remoteStatus === 'refused'

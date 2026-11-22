@@ -30,6 +30,10 @@ export type DiagnosticsInput = {
   hosting?: boolean;
   presence?: string;
   lastClose?: HostCloseRecord | null;
+  /** The signalling socket, which is not the lease: connected, connecting, closed or off. */
+  relay?: string;
+  /** The last refused signalling frame, already reduced to safe fields by the host client. */
+  lastDrop?: string | null;
   transport?: 'direct' | 'relayed' | null;
   renegotiations?: number;
   noteCount?: number;
@@ -107,6 +111,8 @@ export function buildDiagnostics(input: DiagnosticsInput): string {
     lines.push(`last close: ${input.lastClose.code}${reason} · ${age(input.lastClose.at, now)}`);
   }
 
+  lines.push(`relay: ${input.relay ?? UNKNOWN}`);
+  if (input.lastDrop) lines.push(`last dropped frame: ${input.lastDrop}`);
   lines.push(`transport: ${input.transport ?? UNKNOWN}`
     + ` · renegotiations: ${input.renegotiations ?? UNKNOWN}`);
   lines.push(`vault: ${input.noteCount === undefined ? UNKNOWN : noteCountBucket(input.noteCount)} notes`

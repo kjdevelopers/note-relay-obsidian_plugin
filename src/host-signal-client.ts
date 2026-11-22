@@ -32,6 +32,9 @@ const REFRESH_AFTER_REFUSAL_MS = 15_000;
 const SIGNAL_URL = `${WORKER_SOCKET}/v1/signal`;
 const TURN_URL = `${WORKER_ORIGIN}/v1/turn-credentials`;
 const AUTHORITY_URL = `${WORKER_ORIGIN}/v1/authority`;
+/** How often a socket that has no lease may ask presence to renew. */
+const LEASE_ASK_MS = 60_000;
+const SOCKET_STATE: Record<number, string> = { 0: 'connecting', 1: 'open', 2: 'closing', 3: 'closed' };
 const MAX_DATA_MESSAGE = 64 * 1024;
 
 type WireSignal = {
@@ -64,6 +67,10 @@ export class HostSignalClient {
    * the lease and the room, not by this record.
    */
   private lastClose: HostCloseRecord | null = null;
+  /** Last time the absent lease was reported, so a socketless host cannot ask once per tick. */
+  private leaseAskedAt = 0;
+  /** The last refused frame, reduced to a frame type and a reason word. */
+  private lastDrop: string | null = null;
   lastCloseRecord(): HostCloseRecord | null { return this.lastClose; }
   private peerGeneration = 0;
   /**
@@ -92,6 +99,33 @@ export class HostSignalClient {
    */
   private readonly events: string[] = [];
   debugTail(count = 80): string[] { return this.events.slice(-count); }
+  /**
+   * One line per refused frame: what arrived, why it was refused, and the state it was judged in.
+   *
+   * Safe by construction — a frame type is from a fixed vocabulary, an epoch is a small integer, and
+   * the rest is this client's own state. No paths, no note text, no credentials.
+   */
+  /** The most recent refused frame, for the support bundle. */
+  lastDropRecord(): string | null { return this.lastDrop; }
+
+  private dropSignal(type: string, epoch: unknown, reason: string): void {
+    const socket = this.socket ? SOCKET_STATE[this.socket.readyState] ?? 'unknown' : 'none';
+    const close = this.lastClose ? `lastClose=${this.lastClose.code}` : 'lastClose=none';
+    this.lastDrop = `type=${type} reason=${reason}`;
+    this.note(`frame dropped type=${type} reason=${reason}`
+      + ` epoch=${Number.isSafeInteger(epoch) ? String(epoch) : 'none'}`
+      + ` serving=${this.authority.current() ?? 'none'} socket=${socket}`
+      + ` lease=${this.lease() ? 'valid' : 'none'} ${close}`);
+  }
+
+  /** For the status line and the support bundle: the socket, not the lease. */
+  relayState(): 'connected' | 'connecting' | 'closed' | 'off' {
+    if (!this.active) return 'off';
+    if (!this.socket) return 'closed';
+    if (this.socket.readyState === 1) return 'connected';
+    return 'connecting';
+  }
+
   private note(event: string): void {
     const stamp = new Date().toISOString().slice(11, 23);
     this.events.push(`${stamp} ${event}`);
@@ -107,7 +141,8 @@ export class HostSignalClient {
     private key: StoredHostKey, private host: HostLifecycle,
     private adapter: VaultAdapter, private lease: () => AuthorizationLease | null,
     private readerWait?: ReaderWaitMonitor,
-    private onAuthRefused: (() => void) | null = null) {
+    private onAuthRefused: (() => void) | null = null,
+    private onLeaseNeeded: (() => void) | null = null) {
     this.currentHost = host.currentRequest();
   }
 
@@ -282,7 +317,20 @@ export class HostSignalClient {
   }
 
   private async connect(): Promise<void> {
-    if (!this.active || !this.currentHost() || !this.lease()) return;
+    if (!this.active || !this.currentHost()) return;
+    if (!this.lease()) {
+      // The lease lives five minutes and is renewed every five, so a renewal that failed once leaves a
+      // window in which nothing attempts a socket at all: `connect` needs a lease, and the next renewal
+      // is up to five minutes away. Measured 2026-11-22 on a network switch — the vault had presence
+      // "active" and no socket, and the owner was told to turn hosting on. Ask for the renewal now, at
+      // most once a minute, and let the fresh lease bring the socket up.
+      this.note(`connect deferred: no lease (renewal asked ${Date.now() - this.leaseAskedAt < LEASE_ASK_MS ? 'recently' : 'now'})`);
+      if (Date.now() - this.leaseAskedAt >= LEASE_ASK_MS) {
+        this.leaseAskedAt = Date.now();
+        this.onLeaseNeeded?.();
+      }
+      return;
+    }
     try {
       const proof = await signHostSignalProof(this.vaultId, this.sessionId, this.key);
       if (!this.active || !this.currentHost()) return;
@@ -385,11 +433,18 @@ export class HostSignalClient {
   }
 
   private async onSignal(raw: unknown): Promise<void> {
-    if (!this.active || !this.currentHost() || !this.lease() ||
-        typeof raw !== 'string' || raw.length > MAX_DATA_MESSAGE) return;
+    if (typeof raw !== 'string') { this.dropSignal('unknown', null, 'not-text'); return; }
+    if (raw.length > MAX_DATA_MESSAGE) { this.dropSignal('unknown', null, 'oversize'); return; }
     let signal: WireSignal;
-    try { signal = JSON.parse(raw) as WireSignal; } catch { return; }
-    if (!signal || typeof signal !== 'object') return;
+    try { signal = JSON.parse(raw) as WireSignal; } catch { this.dropSignal('unknown', null, 'unparseable'); return; }
+    if (!signal || typeof signal !== 'object') { this.dropSignal('unknown', null, 'malformed'); return; }
+    const type = typeof signal.type === 'string' ? signal.type : 'unknown';
+    // A dropped frame used to be invisible: the gates below are the hot path, so they returned without
+    // a word, and a reader timing out could not tell "the room never delivered" from "the host refused".
+    // Each refusal is named once, with the facts a support bundle needs and no note content in it.
+    if (!this.active) { this.dropSignal(type, signal.epoch, 'hosting-off'); return; }
+    if (!this.currentHost()) { this.dropSignal(type, signal.epoch, 'another-vault'); return; }
+    if (!this.lease()) { this.dropSignal(type, signal.epoch, 'no-lease'); return; }
     // The room sends `ready` only once it holds both sockets, so this frame is the honest arrival
     // signal: an authenticated browser is attached to this vault right now.
     // A `ready` names the epoch this host is serving. It is adopted before anything else is done with
@@ -408,8 +463,9 @@ export class HostSignalClient {
     // A frame from a round this host has already left is dropped rather than served: a reader whose
     // epoch was superseded is not this vault's reader any more, whatever its socket still believes.
     if (signal.epoch !== undefined && !this.authority.allows(signal.epoch)) {
-      this.note(`stale epoch frame ${String(signal.type)} epoch=${String(signal.epoch)} ` +
-        `current=${String(this.authority.current())}`);
+      // Named like every other refusal: expected vs received epoch is the fact that settles whether a
+      // reader is on a retired round or the host is on one.
+      this.dropSignal(String(signal.type), signal.epoch, 'stale-epoch');
       return;
     }
     if ((signal.type === 'offer' || signal.type === 'relay-offer') && typeof signal.data === 'string') {
