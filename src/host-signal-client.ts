@@ -34,11 +34,21 @@ const TURN_URL = `${WORKER_ORIGIN}/v1/turn-credentials`;
 const AUTHORITY_URL = `${WORKER_ORIGIN}/v1/authority`;
 /** How often a socket that has no lease may ask presence to renew. */
 const LEASE_ASK_MS = 60_000;
+/**
+ * How long a socket may be silent before it is treated as dead.
+ *
+ * The relay sends a keepalive frame every 25 seconds, so two rounds of silence is not a slow network —
+ * it is a path that no longer carries anything. A dead path is the failure `readyState` cannot see: it
+ * reads OPEN on both ends, the relay relays offers into it, and the supervisor below refuses to retry
+ * because `this.socket` is set. Measured 2026-11-22: a vault sat dark for 3 minutes 51 seconds, and later
+ * for over 3 minutes, showing "relay: connected" while every offer vanished.
+ */
+const SILENT_SOCKET_MS = 55_000;
 const SOCKET_STATE: Record<number, string> = { 0: 'connecting', 1: 'open', 2: 'closing', 3: 'closed' };
 const MAX_DATA_MESSAGE = 64 * 1024;
 
 type WireSignal = {
-  type: 'ready' | 'peer-left' | 'offer' | 'relay-offer' | 'answer' | 'ice' | 'end' | 'teardown';
+  type: 'ready' | 'peer-left' | 'offer' | 'relay-offer' | 'answer' | 'ice' | 'end' | 'teardown' | 'ping';
   data?: string; epoch?: number; nonce?: string; reader_key?: string | null;
   reason?: string; grace_ms?: number;
 };
@@ -69,6 +79,8 @@ export class HostSignalClient {
   private lastClose: HostCloseRecord | null = null;
   /** Last time the absent lease was reported, so a socketless host cannot ask once per tick. */
   private leaseAskedAt = 0;
+  /** Last frame received on this socket; the keepalive makes silence mean something. */
+  private lastHeardAt = 0;
   /** The last refused frame, reduced to a frame type and a reason word. */
   private lastDrop: string | null = null;
   lastCloseRecord(): HostCloseRecord | null { return this.lastClose; }
@@ -173,7 +185,21 @@ export class HostSignalClient {
     this.supervisor = null;
     if (!this.active) return;
     this.scheduleSupervision();
-    if (this.socket || this.reconnectTimer) return;
+    // A socket object is not a connection. Silence past two keepalive rounds means the path is gone even
+    // though `readyState` still reads OPEN, and returning here is what kept a vault dark for minutes.
+    if (this.socket) {
+      const silent = Date.now() - (this.lastHeardAt || Date.now());
+      if (silent <= SILENT_SOCKET_MS) return;
+      const dead = this.socket;
+      this.socket = null;
+      this.note(`supervisor: socket silent ${Math.round(silent / 1000)}s, reconnecting`);
+      try { dead.close(); } catch { /* gone */ }
+      this.retryAttempt += 1;
+      const delay = reconnectDelay(this.retryAttempt);
+      this.reconnectTimer = setTimer(() => { this.reconnectTimer = null; void this.connect(); }, delay);
+      return;
+    }
+    if (this.reconnectTimer) return;
     if (!this.currentHost() || !this.lease()) return;
     this.note('supervisor: no socket, no retry');
     void this.connect();
@@ -352,13 +378,17 @@ export class HostSignalClient {
           // A socket that opened and authenticated is a working connection: the next failure should
           // start again from the minimum wait rather than from wherever the last outage reached.
           this.retryAttempt = 0;
+          this.lastHeardAt = Date.now();
           // Learn the epoch from the API as well as from `ready`. A host that reconnects into a room
           // that already holds a reader is not sent a fresh `ready`, so this is the only thing that
           // stops its first answer being refused as a stale frame.
           void this.syncAuthority();
         } else socket.close();
       };
-      socket.onmessage = event => { void this.onSignal(event.data).catch(() => this.closePeer()); };
+      socket.onmessage = event => {
+        this.lastHeardAt = Date.now();
+        void this.onSignal(event.data).catch(() => this.closePeer());
+      };
       socket.onclose = event => {
         if (this.socket !== socket) return;
         this.socket = null;
@@ -449,6 +479,13 @@ export class HostSignalClient {
     // signal: an authenticated browser is attached to this vault right now.
     // A `ready` names the epoch this host is serving. It is adopted before anything else is done with
     // the frame, because every later frame is judged against it.
+    // The relay's keepalive: proof the path still carries frames, answered so the relay can tell a live
+    // host from one whose socket died without a close. Nothing else is done with it.
+    if (signal.type === 'ping') {
+      this.lastHeardAt = Date.now();
+      try { this.socket?.send(JSON.stringify({ type: 'pong' })); } catch { /* the supervisor will act */ }
+      return;
+    }
     if (signal.type === 'ready') {
       if (Number.isSafeInteger(signal.epoch)) this.authority.adopt(Number(signal.epoch));
       this.authorityCache.invalidate();

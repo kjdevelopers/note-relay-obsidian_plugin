@@ -112,3 +112,36 @@ test('the relay state follows the socket, not the lease', async () => {
   FakeSocket.instances[0].close(1006, '');
   await until(() => client.relayState() === 'closed', 'the closed state');
 });
+
+test('a silent socket is treated as dead, because OPEN is not a connection', async () => {
+  const { client } = await build({ lease: true });
+  client.start();
+  await until(() => FakeSocket.instances.length === 1, 'the signalling socket');
+  const socket = FakeSocket.instances[0];
+  socket.open();
+  await until(() => socket.sent.length > 0, 'the auth frame');
+
+  // The relay's keepalive is the only thing that makes silence meaningful; two rounds without one is a
+  // path that carries nothing while `readyState` still reads OPEN.
+  (client as unknown as { lastHeardAt: number }).lastHeardAt = Date.now() - 90_000;
+  (client as unknown as { supervise: () => void }).supervise();
+
+  await until(() => socket.readyState === 3, 'the silent socket to be closed');
+  // A retry is scheduled rather than awaited: the delay is the bounded backoff, and the point of the
+  // test is that the supervisor no longer returns early on a socket object.
+  assert.notEqual((client as unknown as { reconnectTimer: unknown }).reconnectTimer, null);
+  assert.match(client.debugTail().join('\n'), /socket silent/);
+});
+
+test('the keepalive is answered and never served as a signal frame', async () => {
+  const { client } = await build({ lease: true });
+  client.start();
+  await until(() => FakeSocket.instances.length === 1, 'the signalling socket');
+  const socket = FakeSocket.instances[0];
+  socket.open();
+  await until(() => socket.sent.length > 0, 'the auth frame');
+
+  socket.deliver({ type: 'ping' });
+  await until(() => socket.sent.some(frame => /"pong"/.test(frame)), 'the pong reply');
+  assert.doesNotMatch(client.debugTail().join('\n'), /frame dropped/);
+});
