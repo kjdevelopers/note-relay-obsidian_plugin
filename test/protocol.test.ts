@@ -797,6 +797,43 @@ test('SEARCH_NOTES returns titles and bounded excerpts, never a note body', asyn
   assert.equal(data.truncated, true);
 });
 
+test('a resumable search hands back where to continue, and takes it back', async () => {
+  // One call cannot read a 17,905-note vault inside the byte budget, so the host names the next page.
+  const seen: Array<string | undefined> = [];
+  const searching: VaultAdapter = {
+    ...adapter,
+    searchNotes: async (_query, _limit, from) => {
+      seen.push(from);
+      return from
+        ? { matches: [{ path: 'late/Hit.md', hits: 1, snippet: '…needle…' }], scanned: 30, total: 100,
+            truncated: false }
+        : { matches: [], scanned: 2401, total: 10000, truncated: true, nextFrom: 'late/Hit.md' };
+    },
+  };
+  const first = await dispatchVaultRequest(searching, { enabled: true, scope: 'read' },
+    { version: 1, id: 'search-1', cmd: 'SEARCH_NOTES', query: 'needle' });
+  assert.equal(first.ok, true);
+  assert.equal((first.data as { nextFrom?: string }).nextFrom, 'late/Hit.md');
+  const second = await dispatchVaultRequest(searching, { enabled: true, scope: 'read' },
+    { version: 1, id: 'search-2', cmd: 'SEARCH_NOTES', query: 'needle', from: 'late/Hit.md' });
+  assert.equal(second.ok, true);
+  assert.deepEqual(seen, [undefined, 'late/Hit.md']);
+  // Done: no next page is offered, so the browser stops asking.
+  assert.equal('nextFrom' in (second.data as object), false);
+});
+
+test('a `from` that is not a note path is refused before any scan', async () => {
+  let called = false;
+  const searching: VaultAdapter = { ...adapter,
+    searchNotes: async () => { called = true; return { matches: [], scanned: 0, total: 0, truncated: false }; } };
+  for (const from of ['', '../escape.md', '/absolute.md', 42]) {
+    const reply = await dispatchVaultRequest(searching, { enabled: true, scope: 'read' },
+      { version: 1, id: 'search-3', cmd: 'SEARCH_NOTES', query: 'needle', from });
+    assert.equal(reply.ok, false, String(from));
+  }
+  assert.equal(called, false, 'a bad cursor must not start a scan');
+});
+
 test('a search result naming an unpublished path is dropped rather than returned', async () => {
   const leaky: VaultAdapter = {
     ...adapter,
