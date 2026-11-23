@@ -1,5 +1,3 @@
-import { hostname } from 'node:os';
-import { hasControlCharacter } from './characters';
 
 /**
  * A stable identity for *this machine*, separate from *this vault*.
@@ -17,7 +15,6 @@ import { hasControlCharacter } from './characters';
  */
 
 const DEVICE_KEY = 'note-relay:device-id';
-const MACHINE_KEY = 'note-relay:machine-label';
 
 /** Same shape the Worker accepts elsewhere: a v4-ish uuid, lowercase. */
 export const deviceIdPattern =
@@ -37,23 +34,14 @@ export type DeviceStorage = {
 export type DeviceIdentity = { deviceId: string; machineLabel: string | null };
 
 /**
- * A machine label a person can recognise.
+ * `machineLabel` is deliberately always null.
  *
- * `os.hostname()` is only reachable in the desktop app; Obsidian mobile has no equivalent and the
- * plugin must not pretend it does, so the label is optional and the Worker treats it as a display
- * convenience rather than an identity.
+ * It used to carry `os.hostname()`, which put a person's machine name — often their own name, a company
+ * name, or a project — into the service's rows for no product reason. The only question the screen asks
+ * is "is this the same machine?", and the random device id already answers it. The display name is the
+ * reader's, set in the browser and stored beside the device; this module never sends one. The field stays
+ * in the shape so every build speaks the same payload.
  */
-export function machineLabel(): string | null {
-  try {
-    const name = hostname();
-    if (typeof name !== 'string') return null;
-    const trimmed = name.trim();
-    if (trimmed.length < 1 || trimmed.length > 64) return null;
-    if (hasControlCharacter(trimmed)) return null;
-    return trimmed;
-  } catch { return null; }
-}
-
 /**
  * The device id for this install, minted once and kept across plugin removals.
  *
@@ -66,25 +54,11 @@ export function getOrCreateDeviceId(storage: DeviceStorage): DeviceIdentity | nu
   try { existing = storage.loadLocalStorage(DEVICE_KEY); }
   catch { return null; }
   if (typeof existing === 'string' && deviceIdPattern.test(existing)) {
-    return { deviceId: existing, machineLabel: storedMachineLabel(storage) };
+    return { deviceId: existing, machineLabel: null };
   }
   const deviceId = crypto.randomUUID();
   try {
     storage.saveLocalStorage(DEVICE_KEY, deviceId);
-    // Written beside the id so a rename of the computer is picked up on the next launch rather than
-    // freezing the name the machine had when the plugin was installed.
-    const label = machineLabel();
-    if (label) storage.saveLocalStorage(MACHINE_KEY, label);
-    return { deviceId, machineLabel: label ?? storedMachineLabel(storage) };
-  } catch { return null; }
-}
-
-function storedMachineLabel(storage: DeviceStorage): string | null {
-  const current = machineLabel();
-  if (current) return current;
-  try {
-    const saved = storage.loadLocalStorage(MACHINE_KEY);
-    return typeof saved === 'string' && saved.length >= 1 && saved.length <= 64 &&
-      !hasControlCharacter(saved) ? saved : null;
+    return { deviceId, machineLabel: null };
   } catch { return null; }
 }
