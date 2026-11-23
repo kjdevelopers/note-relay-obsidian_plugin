@@ -123,3 +123,18 @@ export function buildDiagnostics(input: DiagnosticsInput): string {
   lines.push('No note titles, paths, folder names, search text or file contents are included.');
   return lines.join('\n');
 }
+
+/**
+ * A per-session label for a note path.
+ *
+ * The plugin's event tail is read by whoever is diagnosing a session, and it can be pasted the same way
+ * the viewer's log can. A path in it names something in the reader's vault, so the tail carries `note-1`
+ * instead: enough to follow one note through a sequence, and nothing about what it is called.
+ */
+export function pathLabel(tokens: Map<string, string>, path: string): string {
+  const known = tokens.get(path);
+  if (known) return known;
+  const token = `note-${tokens.size + 1}`;
+  tokens.set(path, token);
+  return token;
+}

@@ -1,5 +1,6 @@
 import { decodeJwt } from 'jose';
 import { Notice, requestUrl } from 'obsidian';
+import { pathLabel } from './diagnostics';
 import { HostLifecycle } from './host-lifecycle';
 import { AuthenticatedReadSession, type AuthorizationLease } from './authenticated-read-session';
 import { hostPairingKeyId } from './pairing-key';
@@ -110,6 +111,16 @@ export class HostSignalClient {
    * disk or sent anywhere. Read through `debugTail()` when a reader says "connected" but sees nothing.
    */
   private readonly events: string[] = [];
+  /**
+   * Note paths are replaced by a per-session label before they reach the trail.
+   *
+   * The comment above claims this tail holds no paths, and it did: `notice sent <last 40 chars of the
+   * path>`. The tail is read by whoever is diagnosing a session and can be pasted, so it gets the same
+   * treatment as the viewer's log — `note-1`, `note-2` — which is enough to follow a sequence and reveals
+   * nothing about what the note is called.
+   */
+  private readonly pathTokens = new Map<string, string>();
+  private pathToken(path: string): string { return pathLabel(this.pathTokens, path); }
   debugTail(count = 80): string[] { return this.events.slice(-count); }
   /**
    * One line per refused frame: what arrived, why it was refused, and the state it was judged in.
@@ -579,7 +590,7 @@ export class HostSignalClient {
     if (!channel || channel.readyState !== 'open') return false;
     try {
       channel.send(JSON.stringify({ type: 'notice', kind: 'note-changed', path, hash }));
-      this.note(`notice sent ${path.slice(-40)}`);
+      this.note(`notice sent ${this.pathToken(path)}`);
       return true;
     } catch { return false; }
   }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildDiagnostics, endpointHost, noteCountBucket } from '../src/diagnostics';
+import { buildDiagnostics, endpointHost, noteCountBucket, pathLabel } from '../src/diagnostics';
 
 const NOW = Date.parse('2026-11-01T14:12:00Z');
 
@@ -125,4 +125,17 @@ test('a diagnostic bundle is not a wall of text', () => {
     transport: 'direct', renegotiations: 0, noteCount: 500, tagCount: 2, view: 'reader',
   });
   assert.ok(text.split('\n').filter(Boolean).length <= 12, text);
+});
+
+// The event tail is copyable, so a path in it names something in the reader's vault.
+test('a note path becomes a per-session label, never the path itself', () => {
+  const tokens = new Map<string, string>();
+  const first = pathLabel(tokens, '_System/People Rename Map.md');
+  assert.equal(first, 'note-1');
+  assert.ok(!first.includes('People'));
+  // The same note keeps its label, so a sequence stays readable.
+  assert.equal(pathLabel(tokens, '_System/People Rename Map.md'), 'note-1');
+  assert.equal(pathLabel(tokens, 'Journal/Today.md'), 'note-2');
+  // A new session starts again: two tails cannot be matched up by their labels.
+  assert.equal(pathLabel(new Map<string, string>(), 'Journal/Today.md'), 'note-1');
 });
