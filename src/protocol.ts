@@ -145,7 +145,7 @@ export interface VaultAdapter {
    * Body-text search over the vault. Returns titles and short excerpts only; the note itself is
    * fetched separately when a result is opened.
    */
-  searchNotes(query: string, limit: number): Promise<SearchReport>;
+  searchNotes(query: string, limit: number, from?: string): Promise<SearchReport>;
 }
 
 /**
@@ -376,7 +376,9 @@ export async function dispatchVaultRequest(adapter: VaultAdapter, access: Access
   const cmd = obj.cmd as Command;
   const isWrite = writeCommands.has(cmd as WriteCommand);
   const permitted = isWrite ? writeFields[cmd as WriteCommand] :
-    cmd === 'SEARCH_NOTES' ? ['version', 'id', 'cmd', 'query', 'limit'] :
+    // `from` resumes a scan where the last one stopped: a large vault cannot be read inside one
+    // reply without either a huge budget or a long freeze, so the reader walks it in pages.
+    cmd === 'SEARCH_NOTES' ? ['version', 'id', 'cmd', 'query', 'limit', 'from'] :
     // READ_RASTER alone takes `full`: the original bytes, for a download.
     cmd === 'READ_RASTER' ? ['version', 'id', 'cmd', 'path', 'full', 'offset'] :
     pathCommands.has(cmd) ? ['version', 'id', 'cmd', 'path'] :
@@ -397,6 +399,10 @@ export async function dispatchVaultRequest(adapter: VaultAdapter, access: Access
   }
   if (cmd === 'SEARCH_NOTES') {
     if (typeof obj.query !== 'string' || parseQuery(obj.query) === null) return { ok: false, id, error: 'FORBIDDEN' };
+    // Optional and additive: a browser that has never seen a resumable reply does not send it.
+    if (obj.from !== undefined && (typeof obj.from !== 'string' || !validMarkdownPath(obj.from))) {
+      return { ok: false, id, error: 'BAD_REQUEST' };
+    }
     if (obj.limit !== undefined &&
         (typeof obj.limit !== 'number' || !Number.isInteger(obj.limit) || obj.limit < 1 || obj.limit > MAX_SEARCH_RESULTS)) {
       return { ok: false, id, error: 'BAD_REQUEST' };
@@ -431,7 +437,10 @@ export async function dispatchVaultRequest(adapter: VaultAdapter, access: Access
   }
   if (cmd === 'SEARCH_NOTES') {
     let report: SearchReport;
-    try { report = await adapter.searchNotes(obj.query as string, (obj.limit as number | undefined) ?? 50); }
+    try {
+      report = await adapter.searchNotes(obj.query as string, (obj.limit as number | undefined) ?? 50,
+        typeof obj.from === 'string' ? obj.from : undefined);
+    }
     catch { return { ok: false, id, error: 'RENDER_FAILED' }; }
     if (!report || !Array.isArray(report.matches)) return { ok: false, id, error: 'RENDER_FAILED' };
     // Each result carries a bounded excerpt, so the whole reply is bounded too.
@@ -444,6 +453,10 @@ export async function dispatchVaultRequest(adapter: VaultAdapter, access: Access
       scanned: Math.max(0, Math.floor(report.scanned)),
       total: Math.max(0, Math.floor(report.total)),
       truncated: report.truncated === true,
+      // The path to resume after, present only when notes were left unread. A browser that predates
+      // this field ignores it; a browser that has it walks the whole vault in pages.
+      ...(typeof report.nextFrom === 'string' && validMarkdownPath(report.nextFrom)
+        ? { nextFrom: report.nextFrom } : {}),
     };
     if (byteLength(JSON.stringify(data)) > MAX_PREVIEW_BYTES) return { ok: false, id, error: 'TOO_LARGE' };
     return { ok: true, id, data };

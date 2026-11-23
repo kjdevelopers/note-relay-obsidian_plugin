@@ -112,6 +112,14 @@ export type SearchReport = {
   scanned: number;
   total: number;
   truncated: boolean;
+  /**
+   * The path to resume after, when the scan stopped with notes still unread.
+   *
+   * A vault large enough to exhaust the byte budget in one pass — 17,905 notes is about 175 MB of text
+   * against a 24 MB budget — used to answer "no matches" for a note it had simply not reached. The
+   * browser asks again from here and walks the whole vault, a page at a time.
+   */
+  nextFrom?: string;
 };
 
 /**

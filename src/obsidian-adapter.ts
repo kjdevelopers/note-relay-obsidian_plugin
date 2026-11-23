@@ -288,18 +288,32 @@ export class ObsidianAdapter implements WritableVaultAdapter {
    * The loop yields every few hundred notes: this runs on Obsidian's own UI thread, and a cold scan
    * of a large vault would otherwise stall typing.
    */
-  async searchNotes(query: string, limit: number): Promise<SearchReport> {
+  async searchNotes(query: string, limit: number, from?: string): Promise<SearchReport> {
     const terms = parseQuery(query);
-    const files = this.app.vault.getMarkdownFiles().filter(file => validMarkdownPath(file.path));
+    // Sorted so that "resume after this path" means the same thing on two calls: the vault's own order
+    // is stable in practice but not a promise, and a page boundary that moves would skip a note.
+    const files = this.app.vault.getMarkdownFiles().filter(file => validMarkdownPath(file.path))
+      .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
     const total = files.length;
     if (!terms) return { matches: [], scanned: 0, total, truncated: false };
+    let start = 0;
+    if (from) {
+      const index = files.findIndex(file => file.path === from);
+      // A note deleted between pages must not stop the walk: resume at the first path after `from`.
+      start = index >= 0 ? index + 1
+        : files.findIndex(file => file.path > from);
+      if (start < 0) return { matches: [], scanned: 0, total, truncated: false };
+    }
 
     const matches: SearchReport['matches'] = [];
     let scanned = 0;
+    let lastIndex = start;
     let bytes = 0;
     let truncated = false;
     const startedAt = Date.now();
-    for (const file of files) {
+    for (let index = start; index < files.length; index += 1) {
+      const file = files[index];
+      lastIndex = index;
       const text = await this.app.vault.cachedRead(file);
       bytes += text.length;
       scanned += 1;
@@ -316,7 +330,11 @@ export class ObsidianAdapter implements WritableVaultAdapter {
         await new Promise<void>(resolve => window.setTimeout(resolve, 0));
       }
     }
-    return { matches: rankMatches(matches, limit), scanned, total, truncated };
+    // Where the next page starts: the note after the last one read. Absent when the walk finished, so a
+    // browser can tell "done" from "stopped early" without arithmetic.
+    const nextFrom = truncated && lastIndex + 1 < files.length ? files[lastIndex + 1].path : undefined;
+    return { matches: rankMatches(matches, limit), scanned, total, truncated,
+      ...(nextFrom ? { nextFrom } : {}) };
   }
 
   async preview(file: FileRef, source: string): Promise<Preview> {
