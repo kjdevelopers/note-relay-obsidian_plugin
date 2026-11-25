@@ -44,3 +44,6 @@ export const IS_DEVELOPMENT_ENDPOINT: boolean = /(^https:\/\/)localhost|127\.0\.
  * would let someone point an installed plugin at their own "newer version".
  */
 export const SITE_ORIGIN = 'https://noterelay.io';
+
+/** The support area: where a member pastes diagnostics and chooses to send them. */
+export const SUPPORT_PAGE_URL = `${SITE_ORIGIN}/support`;

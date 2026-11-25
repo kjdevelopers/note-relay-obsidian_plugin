@@ -1,4 +1,5 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
+import { SUPPORT_PAGE_URL } from './endpoints';
 import type NoteRelayPlugin from './main';
 
 /**
@@ -93,10 +94,21 @@ export class NoteRelaySettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Copy diagnostics for support')
       .setDesc('Copies plugin and Obsidian versions, hosting state, transport, and note count. '
-        + 'It never includes note titles, paths, or contents.')
+        + 'It never includes note titles, paths, or contents. Nothing is sent: the text goes to your '
+        + 'clipboard and no further.')
       .addButton(button => button
         .setButtonText('Copy')
         .onClick(async () => { await this.plugin.copyDiagnosticsToClipboard(); }));
+
+    // The support area is a web page, not an in-app form: the plugin sends nothing, the member pastes
+    // the diagnostics they chose to copy, sees exactly what will be submitted, and presses send.
+    new Setting(containerEl)
+      .setName('Ask for help')
+      .setDesc('Opens the Note Relay support page in your browser. Copy the diagnostics above first '
+        + 'if you want to include them; nothing is attached automatically.')
+      .addButton(button => button
+        .setButtonText('Open support')
+        .onClick(() => { window.open(SUPPORT_PAGE_URL, '_blank'); }));
 
     containerEl.createEl('p', {
       cls: 'setting-item-description',
