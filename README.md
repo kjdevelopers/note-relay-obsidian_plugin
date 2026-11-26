@@ -41,6 +41,12 @@ Note Relay connects a browser to the vault running on your desktop. A Dataview t
 
 > The vault has to be awake and hosting. If your computer is asleep or the plugin is off, the browser cannot reach it. That is a real limitation of how this works, not a bug we are pretending away.
 
+**Hosting controls live in the status bar.** Click the Note Relay indicator for Start, Stop and Restart
+hosting, Copy diagnostic log and Open Note Relay settings. Stop and Restart are only available while
+hosting; a restart disconnects anyone currently reading, and it waits for the stop to finish before
+starting again rather than running the two together. Copy diagnostic log works whether or not hosting is
+on and whether or not the relay is reachable — that is the state you are most likely to want it in.
+
 ## Security: the path a note takes
 
 1. Your browser connects to your vault on the strength of a short-lived signed grant. The grant names the vault and nothing else — not a note, not a path.
