@@ -1,6 +1,7 @@
-import { Modal, Notice, Platform, Plugin, requestUrl, Setting, TFile } from 'obsidian';
+import { apiVersion, Menu, Modal, Notice, Platform, Plugin, requestUrl, Setting, TFile } from 'obsidian';
 import { NoteRelaySettingsTab } from './settings-tab';
 import { ObsidianAdapter } from './obsidian-adapter';
+import { hostingHeading, statusEntries, transitionNotice } from './status-menu';
 import { buildDiagnostics } from './diagnostics';
 import { SITE_ORIGIN, WORKER_ORIGIN } from './endpoints';
 import { isNewerVersion } from './update-check';
@@ -320,8 +321,10 @@ export default class NoteRelayPlugin extends Plugin {
     this.statusEl.addClass('note-relay-status');
     // The status bar was the only on-screen affordance and it did nothing when clicked — the
     // instructions said "turn the host on" without saying where. Make it the control it looks like.
-    this.statusEl.setAttribute('aria-label', 'Note Relay: click to turn local hosting on or off');
-    this.statusEl.onclick = () => this.toggleHost();
+    // A menu, not a bare toggle: the owner asked for the lifecycle controls and the diagnostic log to be
+    // where the state is displayed, rather than in the palette while a connection is failing.
+    this.statusEl.setAttribute('aria-label', 'Note Relay: click for hosting controls and diagnostics');
+    this.statusEl.onclick = (event: MouseEvent) => this.openStatusMenu(event);
     this.setStatus();
     this.watchVaultNotes();
     // A laptop that sleeps wakes with a lapsed presence lease and a dead signal socket, and neither
@@ -393,7 +396,10 @@ export default class NoteRelayPlugin extends Plugin {
       protocolVersion: PROTOCOL_VERSION,
       // Obsidian's version is read from what the app exposes; if it exposes nothing, the line reads
       // `unknown` rather than carrying a guess.
-      obsidianVersion: (this.app as unknown as { version?: string }).version,
+      // `app.version` is what the app answers when a build exposes it; when it does not — which is what
+      // produced "obsidian unknown" in the owner's bundle — the API version is a real, supported number
+      // and is labelled so nobody reads it as the app version.
+      obsidianVersion: (this.app as unknown as { version?: string }).version ?? `api ${apiVersion}`,
       platform: Platform.isMacOS ? 'macos' : Platform.isWin ? 'windows'
         : Platform.isLinux ? 'linux' : Platform.isMobile ? 'mobile' : 'desktop',
       hosting: this.hostEnabled,
@@ -669,27 +675,118 @@ export default class NoteRelayPlugin extends Plugin {
     await this.startRemotePresence();
   }
 
+  /** True while a lifecycle transition is running. One at a time: overlapping starts made duplicate hosts. */
+  private transitioning = false;
+
   private toggleHost(): void {
-    if (this.host.enabled) {
-      const presence = this.presence;
-      this.presence = null;
-      this.signal?.stop(); this.signal = null;
-      this.host.stop();
-      this.remoteStatus = null;
-      this.readerWaiting = false;
-      if (presence) void presence.stop();
-    } else {
-      this.host.start();
-      this.remoteStatus = null;
-      void this.startRemotePresence();
-    }
-    // Remember the owner's own choice. Hosting lives in memory, so an update, a reload or a crash came
-    // back with the relay off — a setting the owner had turned on silently turned itself off, which is
-    // the opposite of what "remembered settings" means. A fresh install has no saved choice and still
-    // starts off.
-    void this.savePluginData({ hostingEnabled: this.hostEnabled });
+    if (this.transitioning) return;
+    if (this.host.enabled) void this.runTransition('stop', () => this.stopHost());
+    else void this.runTransition('start', () => this.startHost());
+  }
+
+  /**
+   * Runs one transition, refusing to start a second while the first is in flight.
+   *
+   * The failure is reported as a failure — with the actual reason, bounded — and the plugin keeps
+   * hosting off rather than pretending a start that threw succeeded. The menu stays usable either way,
+   * because the recovery control is in it.
+   */
+  private async runTransition(action: 'start' | 'stop' | 'restart', run: () => Promise<boolean>): Promise<void> {
+    if (this.transitioning) { new Notice('Note Relay is already changing hosting state'); return; }
+    this.transitioning = true;
     this.setStatus();
-    new Notice(this.hostEnabled ? 'Note Relay read host on; remote presence is verified separately' : 'Note Relay read host off');
+    try {
+      const changed = await run();
+      new Notice(transitionNotice(action, changed ? 'done' : 'already'));
+    } catch (error) {
+      // `String()` on an arbitrary throw prints "[object Object]"; a refusal is only useful if it says
+      // something, so anything that is not an Error is described rather than stringified.
+      const reason = error instanceof Error ? error.message
+        : typeof error === 'string' ? error : 'unexpected failure';
+      new Notice(`Note Relay could not ${action} hosting: ${reason.slice(0, 160)}`, 8000);
+    } finally {
+      this.transitioning = false;
+      this.setStatus();
+    }
+  }
+
+  /** Starts the existing lifecycle. Returns false when it was already running, so the notice can say so. */
+  private async startHost(): Promise<boolean> {
+    if (this.host.enabled) return false;
+    this.host.start();
+    this.remoteStatus = null;
+    void this.startRemotePresence();
+    await this.savePluginData({ hostingEnabled: true });
+    this.setStatus();
+    return true;
+  }
+
+  /**
+   * Stops the existing lifecycle, in the order that releases before it reports.
+   *
+   * Presence is awaited: a restart that begins while the old presence client is still stopping holds two
+   * sockets and two renewals for one vault, which is the duplicate the guard exists to prevent.
+   */
+  private async stopHost(): Promise<boolean> {
+    if (!this.host.enabled) return false;
+    const presence = this.presence;
+    this.presence = null;
+    this.signal?.stop(); this.signal = null;
+    this.host.stop();
+    this.remoteStatus = null;
+    this.readerWaiting = false;
+    if (presence) await presence.stop().catch(() => {});
+    await this.savePluginData({ hostingEnabled: false });
+    this.setStatus();
+    return true;
+  }
+
+  /** An orderly stop, then a start — after the stop has finished, not alongside it. */
+  private async restartHost(): Promise<boolean> {
+    const wasHosting = this.host.enabled;
+    if (wasHosting) await this.stopHost();
+    await this.startHost();
+    return wasHosting;
+  }
+
+  /**
+   * The status bar's menu.
+   *
+   * Obsidian's own `Menu`, anchored on the click, so it behaves like every other status bar control in the
+   * app: same keyboard support, same dismissal, same styling. The entries themselves come from
+   * `status-menu.ts`, which is where the state rules live and where they are tested.
+   */
+  private openStatusMenu(event?: MouseEvent): void {
+    const state = { hosting: this.host.enabled, transitioning: this.transitioning,
+      remoteStatus: this.remoteStatus };
+    const menu = new Menu();
+    menu.addItem(item => item.setTitle(hostingHeading(state)).setDisabled(true));
+    menu.addSeparator();
+    for (const entry of statusEntries(state)) {
+      menu.addItem(item => {
+        // The detail rides in the title rather than in a second line: `MenuItem` has no supported
+        // subtitle field, and inventing one would be relying on an internal shape.
+        item.setTitle(entry.detail ? `${entry.label} — ${entry.detail}` : entry.label)
+          .setDisabled(!entry.enabled);
+        item.onClick(() => {
+          if (entry.action === 'copy-diagnostics') { void this.copyDiagnostics(); return; }
+          if (entry.action === 'open-settings') { this.openSettings(); return; }
+          if (entry.action === 'start') { void this.runTransition('start', () => this.startHost()); return; }
+          if (entry.action === 'stop') { void this.runTransition('stop', () => this.stopHost()); return; }
+          void this.runTransition('restart', () => this.restartHost());
+        });
+      });
+    }
+    if (event) menu.showAtMouseEvent(event);
+    else menu.showAtPosition({ x: 12, y: 12 });
+  }
+
+  /** The settings pane this plugin owns — the same one the palette command opens. */
+  private openSettings(): void {
+    const setting = (this.app as unknown as { setting?: { open(): void; openTabById(id: string): void } }).setting;
+    if (!setting) { new Notice('Open Settings → Community plugins → Note Relay'); return; }
+    setting.open();
+    setting.openTabById(this.manifest.id);
   }
 
   private async startRemotePresence(): Promise<void> {
