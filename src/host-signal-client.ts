@@ -348,6 +348,8 @@ export class HostSignalClient {
     if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status}`);
     const body = response.json as { epoch?: unknown; state?: unknown; holder?: unknown };
     if (!Number.isSafeInteger(body.epoch)) throw new Error('Invalid authority');
+    // A non-string here would stringify to "[object Object]" and then be compared against real state names,
+    // which is never useful. Anything that is not a string is treated as no state at all.
     return { epoch: body.epoch as number,
       state: typeof body.state === 'string' ? body.state : '',
       holder: typeof body.holder === 'string' ? body.holder : null };
