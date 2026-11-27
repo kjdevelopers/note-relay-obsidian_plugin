@@ -10,6 +10,9 @@ type Lookup = {
   accountEmail: string; expiresAt: string;
 };
 type Review = {
+  // accountId is carried so the confirmation can record the same binding the account-connection flow
+  // records. It comes from the verified lookup — the server's answer — not from anything the host chose.
+  accountId: string;
   accountEmail: string; pairingId: string; hostKeyId: string;
   vaultLabel: string; expiresAtMs: number;
 };
@@ -112,7 +115,7 @@ export class PairingFlow {
       if (!presented.ok) throw new Error('Pairing unavailable');
       const hostKeyId = await hostPairingKeyId(key.publicJwk);
       if (this.generation !== generation) throw new Error('Pairing cancelled');
-      const review = { accountEmail: lookup.accountEmail,
+      const review = { accountId: lookup.accountId, accountEmail: lookup.accountEmail,
         pairingId: lookup.pairingId, hostKeyId, vaultLabel,
         expiresAtMs: lookup.expiresAtMs };
       this.pending = { lookup, key, vaultId, review };

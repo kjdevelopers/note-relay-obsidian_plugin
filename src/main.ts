@@ -12,7 +12,8 @@ import { getOrCreateDeviceId } from './device-identity';
 import { pairingApi } from './pairing-api';
 import { deviceApi } from './device-api';
 import { DeviceGrantFlow } from './device-grant-client';
-import { accountStatusLine, parseBinding, vaultLabel, type AccountBinding } from './account-binding';
+import { accountStatusLine, parseBinding, vaultLabel, type AccountBinding,
+  buildBinding} from './account-binding';
 import { getExistingHostKey, replaceHostKey } from './pairing-key-store';
 import { hostPairingKeyId } from './pairing-key';
 import { HostPresenceClient } from './host-presence';
@@ -302,6 +303,7 @@ export default class NoteRelayPlugin extends Plugin {
   private presence: HostPresenceClient | null = null;
   private signal: HostSignalClient | null = null;
   private remoteStatus: 'unpaired' | 'refused' | 'unlinked' | 'blocked' | 'unavailable' | null = null;
+  private lastPairingReview: { accountId: string; accountEmail: string; hostKeyId: string } | null = null;
   /** True only while the signal client can prove an authenticated reader is attached and stuck. */
   private readerWaiting = false;
   /** The account this vault is linked to, or null. Loaded once in onload and shown in the pane. */
@@ -430,8 +432,8 @@ export default class NoteRelayPlugin extends Plugin {
   }
 
   /** Review stage: validates the code, signs the host proof, presents this vault. */
-  async pairWithCode(code: string): Promise<{ accountEmail: string; hostKeyId: string;
-    pairingId: string; vaultLabel: string; vaultId: string }> {
+  async pairWithCode(code: string): Promise<{ accountId: string; accountEmail: string;
+    hostKeyId: string; pairingId: string; vaultLabel: string; vaultId: string }> {
     const vaultId = await this.pairingVaultId();
     // Sent so the site can retire this machine's previous row for the same vault name after a
     // reinstall, instead of listing the vault twice for the rest of the beta. Absent on a host that
@@ -439,13 +441,37 @@ export default class NoteRelayPlugin extends Plugin {
     const device = getOrCreateDeviceId(this.app);
     const review = await this.pairingFlow().review(code.trim().toUpperCase(),
       vaultId, this.app.vault.getName(), device);
-    return { accountEmail: review.accountEmail, hostKeyId: review.hostKeyId,
-      pairingId: review.pairingId, vaultLabel: review.vaultLabel, vaultId };
+    this.lastPairingReview = review;
+    return { accountId: review.accountId, accountEmail: review.accountEmail,
+      hostKeyId: review.hostKeyId, pairingId: review.pairingId,
+      vaultLabel: review.vaultLabel, vaultId };
   }
 
-  /** Confirm stage: signs the confirmation. Succeeds only after the owner approves in the browser. */
+  /**
+   * Confirm stage: signs the confirmation. Succeeds only after the owner approves in the browser.
+   *
+   * On success this records the same binding `awaitAccountConnection` records. Without it a vault paired through
+   * the modal was connected in the account — host row, presence, reader access — while the settings pane said
+   * "not linked" and the status bar told the owner to re-pair. Re-pairing mints a new host key and therefore a
+   * second host row, so the wrong sentence actively created the duplicate it complained about.
+   *
+   * A failed or unconfirmed pairing writes nothing: the binding is a statement about verified server state, and
+   * an unconfirmed attempt has none.
+   */
   async confirmPairing(): Promise<boolean> {
-    return this.pairingFlow().confirm();
+    const confirmed = await this.pairingFlow().confirm();
+    if (!confirmed) return false;
+    const review = this.lastPairingReview;
+    if (review) await this.recordBinding(review.accountId, review.accountEmail, review.hostKeyId);
+    return true;
+  }
+
+  /** The one place a binding is stored, so both flows cannot drift apart again. */
+  private async recordBinding(accountId: string, email: string, hostKeyId: string): Promise<void> {
+    this.binding = buildBinding({ accountId, email, hostKeyId });
+    await this.savePluginData({ account: this.binding });
+    this.lastPairingReview = null;
+    await this.refreshRemotePresence();
   }
 
   clearPairingModal(modal: PairingModal): void {
@@ -615,16 +641,8 @@ export default class NoteRelayPlugin extends Plugin {
       await this.savePluginData({ pendingGrant: null });
     }
     if (answer.state === 'approved') {
-      this.binding = parseBinding({
-        accountId: answer.accountId, email: answer.email,
-        hostKeyId: answer.hostKeyId, pairedAt: new Date().toISOString(),
-      });
-      if (!this.binding) throw new Error('The account response was not usable');
-      await this.savePluginData({ account: this.binding });
-      new Notice(`Note Relay connected to ${this.binding.email}`);
-      // Presence was refused while the vault had no binding; retry it now rather than making the
-      // owner toggle hosting to get the reader in.
-      await this.refreshRemotePresence();
+      await this.recordBinding(answer.accountId, answer.email, answer.hostKeyId);
+      new Notice(`Note Relay connected to ${answer.email}`);
     }
     return answer.state;
   }

@@ -12,6 +12,7 @@ const entries = [
   'host-presence-proof', 'host-presence', 'search', 'transclusion', 'mermaid', 'appearance-probe', 'reconnect', 'host-waiting',
   'host-socket', 'diagnostics', 'device-grant-client', 'account-binding', 'device-api',
   'device-identity', 'release-build-check', 'host-recovery', 'host-authority',
+  'account-binding-parity',
 ];
 
 await mkdir('.test-build', { recursive: true });

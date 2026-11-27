@@ -43,3 +43,21 @@ export function vaultLabel(vaultName: string): string {
   const trimmed = withoutControlCharacters(vaultName.trim());
   return (trimmed || 'This vault').slice(0, 120);
 }
+
+/**
+ * The single way a binding is built, whatever path produced it.
+ *
+ * The plugin had two: the account-connection flow wrote one, and the pairing flow wrote none — so a vault paired
+ * through the modal reported itself unlinked for as long as it stayed paired. A binding is a claim about verified
+ * server state, so it is constructed in one place and validated on the way in.
+ */
+export function buildBinding(input: {
+  accountId: string; email: string; hostKeyId: string; pairedAt?: string;
+}): AccountBinding {
+  const binding = parseBinding({
+    accountId: input.accountId, email: input.email, hostKeyId: input.hostKeyId,
+    pairedAt: input.pairedAt ?? new Date().toISOString(),
+  });
+  if (!binding) throw new Error('The account response was not usable');
+  return binding;
+}
