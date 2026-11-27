@@ -56,6 +56,11 @@ const REQUIRED = [
 const FORBIDDEN = [
   { id: 'insecure build marker', needle: 'insecure-dev', why: 'a development build is identifiable and must never ship' },
   { id: 'development build header', needle: 'x-nr-build', why: 'only a development build sends this header' },
+  // A bundle that compiled in synthetic grant roots would accept grants signed by a key that is not the
+  // production signer. The banner is written by build.mjs only when NR_DEV_TRUST=1, so this is a positive
+  // test for the one thing that must never reach a release.
+  { id: 'development trust banner', needle: 'NR-DEV-TRUST',
+    why: 'synthetic grant roots were compiled in — that bundle trusts a signer production must not trust' },
 ];
 
 const hosts = new Set();

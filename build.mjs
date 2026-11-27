@@ -19,6 +19,26 @@ if (origin !== PRODUCTION_ORIGIN) {
   console.log(`Note Relay: building against ${origin} (NR_WORKER_ORIGIN override)`);
 }
 
+// Development trust is an explicit opt-in and cannot be reached by setting a key set alone. A bundle built
+// with it carries a banner that `scripts/check-release-build.mjs` refuses, and its runtime gate is this
+// compiled boolean, so a release build ignores an injected set even if one were present.
+const devTrust = process.env.NR_DEV_TRUST === '1';
+let devGrantJwks = null;
+if (devTrust) {
+  const raw = (process.env.NR_GRANT_PUBLIC_JWKS ?? '').trim();
+  if (raw) {
+    try {
+      devGrantJwks = JSON.parse(raw);
+    } catch {
+      throw new Error('NR_GRANT_PUBLIC_JWKS is set but is not valid JSON');
+    }
+  }
+  console.log('Note Relay: DEVELOPMENT TRUST — synthetic grant roots compiled in; this bundle must not be published');
+}
+if (devTrust && origin === PRODUCTION_ORIGIN) {
+  throw new Error('NR_DEV_TRUST=1 with the production origin: a development build must name its own relay');
+}
+
 await build({
   entryPoints: ['src/main.ts'],
   outfile: 'main.js',
@@ -31,5 +51,12 @@ await build({
   sourcemap: false,
   minify: false,
   logLevel: 'info',
-  define: { __NR_WORKER_ORIGIN__: JSON.stringify(origin) },
+  define: {
+    __NR_WORKER_ORIGIN__: JSON.stringify(origin),
+    __NR_DEV_TRUST__: JSON.stringify(devTrust),
+    __NR_GRANT_PUBLIC_JWKS__: JSON.stringify(devTrust ? devGrantJwks : null),
+  },
+  // The literal below exists in a development bundle and nowhere else, which is what lets the release gate
+  // refuse it without having to guess from behaviour.
+  banner: devTrust ? { js: '/* NR-DEV-TRUST: synthetic grant roots compiled in; not for publication */' } : undefined,
 });
