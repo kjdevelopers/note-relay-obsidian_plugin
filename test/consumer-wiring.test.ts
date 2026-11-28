@@ -66,3 +66,14 @@ test('the decision is total: no combination returns undefined', () => {
     }
   }
 });
+
+test('the replace-key dialog routes every outcome through the tested vocabulary', () => {
+  const main = read('main.ts');
+  assert.match(main, /describeReplacementFailure\(error\)/, 'a failure must name its cause');
+  assert.match(main, /replacementSuccessText\(/, 'success must state the consequence, not just the new fingerprint');
+  // The old one-size sentence and the bare reassurance are gone: both hid which thing happened.
+  assert.doesNotMatch(main, /Key replacement failed\. The current key was not changed\./);
+  assert.doesNotMatch(main, /New fingerprint: \$\{/);
+  // A non-retryable failure must not leave a button that invites the same failure again.
+  assert.match(main, /button\.disabled = !failure\.retryable/);
+});

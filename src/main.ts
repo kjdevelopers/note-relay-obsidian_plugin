@@ -22,6 +22,7 @@ import { HostSignalClient } from './host-signal-client';
 import { READER_WAIT_MESSAGE, READER_WAIT_STATUS, ReaderWaitMonitor } from './host-waiting';
 import { describeStatus, hostingIntent } from './status-text';
 import { messageOfThrown } from './pairing-messages';
+import { describeReplacementFailure, replacementSuccessText } from './key-replacement-messages';
 import type { AuthorizationLease } from './authenticated-read-session';
 import { planVaultIdentity } from './vault-identity';
 
@@ -107,7 +108,7 @@ class ReplacePairingKeyModal extends Modal {
       const vaultId = await this.plugin.pairingVaultId();
       const key = await getExistingHostKey(vaultId);
       if (this.closed) return;
-      if (!key) { status.setText('No local pairing key exists yet.'); return; }
+      if (!key) { status.setText(describeReplacementFailure(new Error('No host key to replace')).message); return; }
       const oldId = await hostPairingKeyId(key.publicJwk);
       if (this.closed) return;
       status.setText(`Current fingerprint: ${oldId}`);
@@ -126,12 +127,16 @@ class ReplacePairingKeyModal extends Modal {
         try {
           const replacement = await replaceHostKey(vaultId, oldId);
           if (this.closed) return;
-          result.setText(`New fingerprint: ${await hostPairingKeyId(replacement.publicJwk)}. Pair again with a new code in the browser.`);
+          // The consequence first: a new key invalidates every grant the old one signed, so the vault is disconnected
+          // until it is paired again. A reassuring sentence here leaves the owner with a browser that will not connect.
+          result.setText(replacementSuccessText(await hostPairingKeyId(replacement.publicJwk)));
           input.disabled = true;
-        } catch {
+        } catch (error) {
           if (this.closed) return;
-          result.setText('Key replacement failed. The current key was not changed.');
-          button.disabled = false;
+          const failure = describeReplacementFailure(error);
+          result.setText(failure.message);
+          // Only re-enable when re-running the same action could plausibly work.
+          button.disabled = !failure.retryable;
         }
       }));
     } catch (error) {
