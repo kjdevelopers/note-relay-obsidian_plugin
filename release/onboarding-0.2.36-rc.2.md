@@ -10,16 +10,13 @@ Identity: disposable E2E account `0facdac0-3ec1-4e1b-b587-adc3deacb65c`. Artefac
 | 3. malformed identity refused | **PASS** | `{"vaultId":"not-a-uuid"}` → `Invalid Note Relay vault identity`, plugin still loaded, nothing overwritten |
 | 4. first pairing writes the binding | **PASS** | begin → review (`hostKeyId mqXFIuv…`) → approve **200 `{approved:true,takeover:false}`** → confirm **true** → `accountBinding()` returned account, email, hostKeyId, `pairedAt 2026-11-28T01:07:38.134Z` |
 | 5. binding and identity survive a reload | **PASS** | `app:reload` → still enabled and loaded, same `vaultId 56c4ee4f…`, same `account`, hosting off |
-| 6. upgrade over a previously paired vault | **PARTIAL** | rc.2 installed into `genuine-test-vault`, whose store is `{vaultId ceb2a006…, hostingEnabled:false}` with no `account` — a valid identity that is reused, not re-minted. The live post-upgrade read is **BLOCKED**, see below |
-| 7. application restart | **BLOCKED** | Cmd-Q was delivered as a real key event and the debug surface closed (observed), but the relaunched app does not re-expose the debug port while this machine's display is asleep, so post-restart state could not be read. Reload (step 5) exercises the same load path |
+| 6. upgrade over a previously paired vault | **PASS (measured 2026-11-28)** | rc.2 installed into `genuine-test-vault` (`{vaultId ceb2a006…, hostingEnabled:false}`, no `account`). Live read after launch: plugin `0.2.36-rc.2` enabled and loaded, `binding:null`, hosting default **off**, vaultId on disk unchanged — a valid identity reused, not re-minted. Hosting toggled on → **"Note Relay: remote presence active"** at 9 s and 18 s, then off |
+| 7. application restart | **PARTIAL (measured 2026-11-28)** | Cmd-Q closed the vault windows and left the app process with **zero debug targets**; re-opening the vault restored a window where the plugin reported `0.2.36-rc.2`, enabled, loaded, `binding:null`, hosting **off**, and the same on-disk identity. A full process restart was not observed — the app process stayed alive between the two windows — so this is a window/load-path restart, not a cold start |
 
 ## BLOCKED steps and why
 
-- **Step 6 live read.** After the restart attempt the app has no debug port, so the upgraded vault's runtime state
-  cannot be read. The store on disk is intact and shows the identity preserved; the code path (`planVaultIdentity` →
-  `reuse` for a valid uuid) is what step 2 and its tests pin. Re-run step 6 with a working display before tagging.
-- **Step 7.** Environment, not product: the display is asleep and Obsidian does not open the debugging port in that
-  state. `app:reload` covers the persistence claim; a true restart remains unverified.
+- **Step 7.** Not product: the app process survived the quit, so what was measured is a window re-open plus plugin load,
+  not a cold start. A cold-start check needs the app fully terminated, which this surface's process-kill control refuses.
 
-Owner decision required before a tag: either re-run steps 6 and 7 on an awake machine, or accept the reload as the
-persistence proof and record that decision here.
+Owner decision required before a tag: either accept this window-reopen evidence as the restart proof, or run one cold
+start on a machine where terminating Obsidian is permitted. Steps 1–6 are PASS.
