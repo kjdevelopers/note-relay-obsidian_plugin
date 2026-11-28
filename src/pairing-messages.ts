@@ -54,3 +54,16 @@ export const PAIRING_EXPIRED = 'That pairing request expired before it was confi
 
 /** Chrome still believes it is mid-flow. Says how to get out rather than only that it cannot proceed. */
 export const PAIRING_BUSY = 'A pairing attempt is still running. Wait for it to finish, or cancel it, then try again.';
+
+/**
+ * The flow's own sentence when it has one.
+ *
+ * A thrown value is either an Error this plugin authored (see above) or a transport failure whose text is noise
+ * ("fetch failed", "Load failed"). Anything unrecognisable falls back, so a modal is never blank and never shows the
+ * browser's wording for a network error to someone looking for a pairing code.
+ */
+export function messageOfThrown(error: unknown, fallback: string): string {
+  const text = error instanceof Error ? error.message.trim() : '';
+  const transportNoise = /fetch failed|networkerror|load failed|failed to fetch/i.test(text);
+  return text.length >= 8 && !transportNoise ? text : fallback;
+}

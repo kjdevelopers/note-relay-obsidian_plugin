@@ -20,6 +20,8 @@ import { HostPresenceClient } from './host-presence';
 import { setPluginVersion } from './client-version';
 import { HostSignalClient } from './host-signal-client';
 import { READER_WAIT_MESSAGE, READER_WAIT_STATUS, ReaderWaitMonitor } from './host-waiting';
+import { describeStatus } from './status-text';
+import { messageOfThrown } from './pairing-messages';
 import type { AuthorizationLease } from './authenticated-read-session';
 import { planVaultIdentity } from './vault-identity';
 
@@ -68,12 +70,14 @@ class PairingModal extends Modal {
               'Not confirmed. Approve the fingerprint in the browser first; if it is already ' +
               'approved, this vault may already be paired — disconnect it there, then start again.');
             if (!confirmed) confirmButton.disabled = false;
-          } catch {
-            result.setText('Pairing unavailable or expired. Start with a new code.');
+          } catch (error) {
+            // The flow now carries the reason — rate limit, used code, dead relay, permission. Replacing it with a
+            // generic sentence is how a precise message dies one layer above the place it was built.
+            result.setText(messageOfThrown(error, 'Confirming failed. Start with a new code.'));
           }
         }));
-      } catch {
-        status.setText('Pairing code unavailable. Check the code or try again later.');
+      } catch (error) {
+        status.setText(messageOfThrown(error, 'Pairing code unavailable. Check the code or try again later.'));
         reviewButton.disabled = false;
       }
     }));
@@ -765,19 +769,13 @@ export default class NoteRelayPlugin extends Plugin {
   }
 
   private statusText(): string {
-    // "remote presence active" is a lease, and a lease outlives its socket by five minutes: the owner
-    // saw that green line while the relay had no host connection at all. The socket is reported beside
-    // it now, so the indicator cannot claim a connection the vault does not have.
-    const relay = this.signal?.relayState();
-    const reached = relay === 'connected' ? '' : relay === undefined || relay === 'off' ? ''
-      : '; relay reconnecting';
-    return !this.hostEnabled ? 'off' : this.readerWaiting ? READER_WAIT_STATUS
-      : this.currentRemoteLease() ? `remote presence active${reached}` : this.remoteStatus === 'unpaired'
-        ? 'hosting on; vault not paired' : this.remoteStatus === 'blocked'
-          ? 'hosting on; plugin update required' : this.remoteStatus === 'unlinked'
-            ? 'hosting on; vault not linked, re-pair' : this.remoteStatus === 'refused'
-              ? 'hosting on; relay refused, retrying' : this.remoteStatus === 'unavailable'
-                ? 'hosting on; remote unavailable' : 'hosting on; remote lease pending';
+    return describeStatus({
+      hostEnabled: this.hostEnabled,
+      readerWaiting: this.readerWaiting,
+      leaseActive: this.currentRemoteLease() !== null,
+      remoteStatus: this.remoteStatus,
+      relay: this.signal?.relayState(),
+    });
   }
 
   private setStatus(): void {

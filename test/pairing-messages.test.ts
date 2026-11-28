@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { describePairingFailure, PAIRING_BUSY, PAIRING_EXPIRED } from '../src/pairing-messages';
+import { describePairingFailure, messageOfThrown, PAIRING_BUSY, PAIRING_EXPIRED } from '../src/pairing-messages';
 import { PairingFlow } from '../src/pairing-flow';
 import { generateHostPairingKey } from '../src/pairing-key';
 
@@ -101,4 +101,17 @@ test('confirming with nothing pending says how to start, not that pairing is una
   await assert.rejects(() => flow.confirm(), /no pairing waiting/i);
   assert.match(PAIRING_EXPIRED, /Start pairing again/i);
   assert.match(PAIRING_BUSY, /cancel/i);
+});
+
+test('a plugin-authored sentence survives to the modal; transport noise does not', () => {
+  const rateLimited = new Error(describePairingFailure(429).message);
+  assert.match(messageOfThrown(rateLimited, 'fallback'), /Wait a minute/i);
+
+  // The browser's wording for a dead network tells a customer nothing they can act on.
+  for (const noise of ['fetch failed', 'TypeError: Load failed', 'NetworkError when attempting to fetch resource.']) {
+    assert.equal(messageOfThrown(new Error(noise), 'fallback'), 'fallback', noise);
+  }
+  assert.equal(messageOfThrown(undefined, 'fallback'), 'fallback');
+  assert.equal(messageOfThrown({ message: 'not an Error' }, 'fallback'), 'fallback');
+  assert.equal(messageOfThrown(new Error('   '), 'fallback'), 'fallback');
 });
