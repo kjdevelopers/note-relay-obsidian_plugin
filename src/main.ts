@@ -21,6 +21,7 @@ import { setPluginVersion } from './client-version';
 import { HostSignalClient } from './host-signal-client';
 import { READER_WAIT_MESSAGE, READER_WAIT_STATUS, ReaderWaitMonitor } from './host-waiting';
 import type { AuthorizationLease } from './authenticated-read-session';
+import { planVaultIdentity } from './vault-identity';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -484,15 +485,14 @@ export default class NoteRelayPlugin extends Plugin {
   }
 
   private async loadPairingVaultId(): Promise<string> {
-    const saved = await this.loadData() as unknown;
-    if (saved && typeof saved === 'object' &&
-        typeof (saved as { vaultId?: unknown }).vaultId === 'string' &&
-        uuid.test((saved as { vaultId: string }).vaultId)) {
-      return (saved as { vaultId: string }).vaultId;
-    }
-    if (saved !== null && saved !== undefined) throw new Error('Invalid Note Relay vault identity');
+    const plan = planVaultIdentity(await this.loadData());
+    if (plan.action === 'reuse') return plan.vaultId;
+    // A vaultId that is present and malformed may already be registered on the relay; replacing it would orphan
+    // that row, so it is refused. An absent one is simply a vault that has not paired yet.
+    if (plan.action === 'refuse') throw new Error('Invalid Note Relay vault identity');
     const vaultId = crypto.randomUUID();
-    await this.saveData({ vaultId });
+    // Merge, so a setting written before the first pairing is not lost when the identity arrives after it.
+    await this.savePluginData({ vaultId });
     return vaultId;
   }
 
