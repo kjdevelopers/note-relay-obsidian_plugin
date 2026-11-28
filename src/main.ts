@@ -23,7 +23,6 @@ import { READER_WAIT_MESSAGE, READER_WAIT_STATUS, ReaderWaitMonitor } from './ho
 import type { AuthorizationLease } from './authenticated-read-session';
 import { planVaultIdentity } from './vault-identity';
 
-const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
  * An event listener is typed to return nothing; an async handler returns a promise whose rejection

@@ -93,6 +93,17 @@ the clipboard access is the copy button on a code block.
 4. A source patch that arrives from another session may list a test file it does not contain — check the
    test count against the brief, and read `test/build-and-test.mjs` before trusting it.
 
+## Onboarding gate (added 2026-11-28)
+
+A release that installs but cannot be paired is not a release. `0.2.35` passed every test and could not pair a new
+vault, because the identity guard refused a store that had a setting and no identity. Before any tag:
+
+1. Run `release/ONBOARDING-GATE.md` against a throwaway vault and record it as `release/onboarding-<version>.md`.
+2. `release.yml` refuses a tag without that file, and refuses one that records a `BLOCKED` step without an owner decision.
+
+The gate's first three steps are the ones no unit test can see: Obsidian's Restricted Mode, a settings write before the
+identity exists, and a real pairing round trip.
+
 ## Compatibility is a standing requirement
 
 Installs are manual and old builds stay in the field, so the service may never assume the installed plugin is
