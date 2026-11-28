@@ -1,6 +1,7 @@
 import {
   hostPairingKeyId, signHostPairingConfirmation, signHostPairingProof,
 } from './pairing-key';
+import { describePairingFailure, PAIRING_BUSY, PAIRING_EXPIRED } from './pairing-messages';
 import { getOrCreateHostKey } from './pairing-key-store';
 import type { StoredHostKey } from './pairing-key-store';
 import { hasControlCharacter } from './characters';
@@ -92,7 +93,7 @@ export class PairingFlow {
 
   async review(code: string, vaultId: string, vaultLabel: string,
     device: PairingDevice | null = null): Promise<Review> {
-    if (this.busy) throw new Error('Pairing in progress');
+    if (this.busy) throw new Error(PAIRING_BUSY);
     if (!codePattern.test(code) || !uuid.test(vaultId) ||
         vaultLabel.length < 1 || vaultLabel.length > 80 ||
         vaultLabel.trim() !== vaultLabel || hasControlCharacter(vaultLabel)) {
@@ -112,7 +113,7 @@ export class PairingFlow {
       if (this.generation !== generation) throw new Error('Pairing cancelled');
       const presented = await this.present(code, vaultId, key, signature, vaultLabel, device);
       if (this.generation !== generation) throw new Error('Pairing cancelled');
-      if (!presented.ok) throw new Error('Pairing unavailable');
+      if (!presented.ok) throw new Error(describePairingFailure(presented.status).message);
       const hostKeyId = await hostPairingKeyId(key.publicJwk);
       if (this.generation !== generation) throw new Error('Pairing cancelled');
       const review = { accountId: lookup.accountId, accountEmail: lookup.accountEmail,
@@ -124,11 +125,12 @@ export class PairingFlow {
   }
 
   async confirm(): Promise<boolean> {
-    if (this.busy) throw new Error('Pairing in progress');
+    if (this.busy) throw new Error(PAIRING_BUSY);
     const pending = this.pending;
-    if (!pending || Date.now() >= pending.lookup.expiresAtMs) {
+    if (!pending) throw new Error('There is no pairing waiting to be confirmed. Start pairing again to get a code.');
+    if (Date.now() >= pending.lookup.expiresAtMs) {
       this.pending = null;
-      throw new Error('Pairing unavailable');
+      throw new Error(PAIRING_EXPIRED);
     }
     this.busy = true;
     const generation = this.generation;
