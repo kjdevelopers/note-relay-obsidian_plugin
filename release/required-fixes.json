@@ -1,0 +1,29 @@
+{
+  "//": "Fixes that must be present in any release, expressed as behaviour rather than as commit ids. A cherry-pick across sixteen releases produces a new SHA, so an ancestry check would fail on a correct port and pass on a stale branch that happens to share history. Each entry names a file, a pattern that proves the behaviour, and why it must not be lost.",
+  "required": [
+    {
+      "id": "account-binding-one-constructor",
+      "file": "src/account-binding.ts",
+      "pattern": "export function buildBinding(",
+      "why": "The pairing flow and the account-connection flow must record the same facts. Without one constructor they drifted, and a paired vault told its owner to re-pair — which minted a second host row."
+    },
+    {
+      "id": "account-binding-parity-test",
+      "file": "test/account-binding-parity.test.ts",
+      "pattern": "a paired vault is never told to re-pair",
+      "why": "The behaviour is only as durable as the assertion that pins it."
+    },
+    {
+      "id": "pairing-review-carries-account",
+      "file": "src/pairing-flow.ts",
+      "pattern": "accountId",
+      "why": "The confirmation must record the account the server verified, not one the host chose."
+    },
+    {
+      "id": "release-build-gate",
+      "file": "scripts/check-release-build.mjs",
+      "pattern": "teardown-ack-v1",
+      "why": "The packaged bundle must carry what the relay refuses without; source that passes is not an artefact that works."
+    }
+  ]
+}

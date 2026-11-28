@@ -24,6 +24,15 @@ jobs:
       - run: pnpm exec tsc --noEmit
       - run: pnpm lint
       - run: pnpm test
+      - name: The ancestry gate refuses a tree without a required fix
+        run: |
+          if node scripts/check-release-ancestry.mjs --at 0.2.35; then
+            echo "✗ the ancestry gate certified 0.2.35, which predates the account-binding fix" >&2
+            exit 1
+          fi
+          echo "check-release-ancestry correctly refused a tree that lacks the binding correction"
+          node scripts/check-release-ancestry.mjs
+
       - name: A development bundle is refused as a release
         env:
           NR_WORKER_ORIGIN: https://noterelay-auth-dev.example.workers.dev
