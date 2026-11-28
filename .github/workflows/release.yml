@@ -63,9 +63,15 @@ jobs:
             echo "  (a release that installs but cannot be paired is not a release — see the gate's preamble)" >&2
             exit 1
           fi
-          if grep -q '^\s*BLOCKED' "$f"; then
-            echo "✗ $f records a BLOCKED step; that needs an explicit owner decision quoted in the file" >&2
-            exit 1
+          # A step that is BLOCKED or PARTIAL is not a passing gate. Either is acceptable only when the record carries
+          # a line beginning "Owner decision recorded", which is the human accepting it in writing. Without this, a
+          # PARTIAL quietly becomes a pass because the word BLOCKED was replaced by a softer one.
+          if grep -Eq '^\s*BLOCKED|\*\*PARTIAL' "$f"; then
+            if ! grep -q '^Owner decision recorded' "$f"; then
+              echo "✗ $f records a BLOCKED or PARTIAL step and no recorded owner decision" >&2
+              exit 1
+            fi
+            echo "onboarding gate carries a recorded owner decision for its PARTIAL step"
           fi
           echo "onboarding gate recorded: $f"
 

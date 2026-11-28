@@ -58,5 +58,6 @@ Those are manual, and they are the steps that found every real defect in this ar
 
 ## Blocker rule
 
-Any step that cannot be run is recorded as **BLOCKED** with the reason — never as passed. A release with a blocked
-gate needs an explicit owner decision, quoted in the evidence.
+Any step that cannot be run is recorded as **BLOCKED**, or **PARTIAL** when part of it was measured, with the reason —
+never as passed. `release.yml` refuses the tag while either word appears unless the record also carries a line beginning
+`Owner decision recorded`, which is the owner accepting that specific gap in writing. A softer word is not a pass.

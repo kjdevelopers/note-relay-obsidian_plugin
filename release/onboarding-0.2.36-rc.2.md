@@ -18,5 +18,6 @@ Identity: disposable E2E account `0facdac0-3ec1-4e1b-b587-adc3deacb65c`. Artefac
 - **Step 7.** Not product: the app process survived the quit, so what was measured is a window re-open plus plugin load,
   not a cold start. A cold-start check needs the app fully terminated, which this surface's process-kill control refuses.
 
-Owner decision required before a tag: either accept this window-reopen evidence as the restart proof, or run one cold
-start on a machine where terminating Obsidian is permitted. Steps 1–6 are PASS.
+Owner decision pending: either accept this window-reopen evidence as the restart proof, or run one cold start on a
+machine where terminating Obsidian is permitted. Steps 1–6 are PASS, step 7 is PARTIAL. `release.yml` refuses the tag
+until a line beginning `Owner decision recorded` says which.
