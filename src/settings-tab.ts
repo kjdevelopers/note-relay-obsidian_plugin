@@ -43,7 +43,7 @@ export class NoteRelaySettingsTab extends PluginSettingTab {
         + 'until the vault is paired.')
       .addToggle(toggle => toggle
         .setValue(this.plugin.hostEnabled)
-        .onChange(() => { this.plugin.toggleHosting(); this.display(); }));
+        .onChange(value => { this.plugin.setHosting(value); this.display(); }));
 
     new Setting(containerEl)
       .setName('Account')

@@ -46,3 +46,20 @@ export function describeStatus(s: StatusSnapshot): string {
   if (s.remoteStatus === 'unavailable') return 'hosting on; remote unavailable';
   return 'hosting on; remote lease pending';
 }
+
+/**
+ * What a request to host or not host should actually do.
+ *
+ * A switch that reports a boolean and then calls a blind toggle is correct only while nothing else changes hosting
+ * between the render and the click — and three other things do: the status bar, the ribbon and the command palette. The
+ * observed failure is a pane rendered while hosting was on, another surface turning it off, and the owner clicking the
+ * switch to turn it on: the blind toggle turns it off again and the control disagrees with the product.
+ *
+ * Idempotence is the property, so it is stated once, here, where it can be asserted.
+ */
+export type HostingIntent = 'start' | 'stop' | 'noop';
+
+export function hostingIntent(current: boolean, requested: boolean): HostingIntent {
+  if (current === requested) return 'noop';
+  return requested ? 'start' : 'stop';
+}

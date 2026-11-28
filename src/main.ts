@@ -20,7 +20,7 @@ import { HostPresenceClient } from './host-presence';
 import { setPluginVersion } from './client-version';
 import { HostSignalClient } from './host-signal-client';
 import { READER_WAIT_MESSAGE, READER_WAIT_STATUS, ReaderWaitMonitor } from './host-waiting';
-import { describeStatus } from './status-text';
+import { describeStatus, hostingIntent } from './status-text';
 import { messageOfThrown } from './pairing-messages';
 import type { AuthorizationLease } from './authenticated-read-session';
 import { planVaultIdentity } from './vault-identity';
@@ -509,6 +509,18 @@ export default class NoteRelayPlugin extends Plugin {
    * that tells a new user what to do had no way to call them.
    */
   toggleHosting(): void { this.toggleHost(); }
+
+  /**
+   * Set hosting to a requested state rather than flipping it.
+   *
+   * The settings pane's switch reports the state it wants; a blind toggle would invert whenever the pane's render was
+   * stale, which is easy to produce by using the status bar in between. Asking for the state we are already in does
+   * nothing but refresh the display.
+   */
+  setHosting(enabled: boolean): void {
+    if (hostingIntent(this.hostEnabled, enabled) === 'noop') { this.setStatus(); return; }
+    this.toggleHost();
+  }
 
   hostingStatus(): string { return this.statusText(); }
 
