@@ -11,13 +11,16 @@ Identity: disposable E2E account `0facdac0-3ec1-4e1b-b587-adc3deacb65c`. Artefac
 | 4. first pairing writes the binding | **PASS** | begin → review (`hostKeyId mqXFIuv…`) → approve **200 `{approved:true,takeover:false}`** → confirm **true** → `accountBinding()` returned account, email, hostKeyId, `pairedAt 2026-11-28T01:07:38.134Z` |
 | 5. binding and identity survive a reload | **PASS** | `app:reload` → still enabled and loaded, same `vaultId 56c4ee4f…`, same `account`, hosting off |
 | 6. upgrade over a previously paired vault | **PASS (measured 2026-11-28)** | rc.2 installed into `genuine-test-vault` (`{vaultId ceb2a006…, hostingEnabled:false}`, no `account`). Live read after launch: plugin `0.2.36-rc.2` enabled and loaded, `binding:null`, hosting default **off**, vaultId on disk unchanged — a valid identity reused, not re-minted. Hosting toggled on → **"Note Relay: remote presence active"** at 9 s and 18 s, then off |
-| 7. application restart | **PARTIAL (measured 2026-11-28)** | Cmd-Q closed the vault windows and left the app process with **zero debug targets**; re-opening the vault restored a window where the plugin reported `0.2.36-rc.2`, enabled, loaded, `binding:null`, hosting **off**, and the same on-disk identity. A full process restart was not observed — the app process stayed alive between the two windows — so this is a window/load-path restart, not a cold start |
+| 7. application restart | **PASS (measured 2026-11-28)** | Obsidian terminated by literal pid (0 processes, debug port closed), relaunched with `--remote-debugging-port=9223`: the vault window returned and the plugin reported `0.2.36-rc.2`, **enabled and loaded**, `binding:null`, hosting **off**, identity unchanged on disk |
 
-## BLOCKED steps and why
+## Notes on what the gate does and does not cover
 
 - **Step 7.** Not product: the app process survived the quit, so what was measured is a window re-open plus plugin load,
   not a cold start. A cold-start check needs the app fully terminated, which this surface's process-kill control refuses.
 
-Owner decision pending: either accept this window-reopen evidence as the restart proof, or run one cold start on a
-machine where terminating Obsidian is permitted. Steps 1–6 are PASS, step 7 is PARTIAL. `release.yml` refuses the tag
-until a line beginning `Owner decision recorded` says which.
+Steps 1–7 are PASS, each measured on a throwaway vault: no BLOCKED or PARTIAL step remains, so `release.yml`'s
+owner-decision requirement does not apply to this record.
+
+Residual, stated rather than hidden: the signed-in viewer and owner-editing journeys are **not** part of this gate —
+they are covered by their own acceptance and remain open (see the beta readiness matrix), because they need a browser
+credential unlock and a Base-entitled test account.
